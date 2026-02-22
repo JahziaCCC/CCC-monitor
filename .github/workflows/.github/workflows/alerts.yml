@@ -1,0 +1,53 @@
+name: Alerts (Only If New)
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mewa-alerts
+  cancel-in-progress: true
+
+jobs:
+  alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps (fast)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --no-input --disable-pip-version-check
+
+      - name: Run alerts (only if new) — NO AIS
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "import main; main.run('🚨 فحص تنبيهات', only_if_new=True, include_ais=False)"
+
+      - name: Persist state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add state.json || true
+          git commit -m "update state" || true
+          git push || true
