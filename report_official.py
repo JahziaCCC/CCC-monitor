@@ -15,16 +15,12 @@ def _general_status_score(events):
 
         if sec == "marine" or "ukmto" in t:
             score += 3
-
         elif sec == "ports":
             c = (e.get("meta") or {}).get("count", 0)
-            # ✅ لا نرفع النقاط إلا عند ازدحام حقيقي
             if c >= 30:
                 score += 2
-
         elif sec == "gdacs":
             score += 2
-
         elif sec == "dust":
             score += 1
 
@@ -35,7 +31,6 @@ def _general_status_score(events):
     return "هادئة", score
 
 def _trend_arrow(score, state):
-    # ✅ أول تقرير: لا نقارن حتى ما يطلع ↑ بلا معنى
     if "prev_score" not in state:
         state["prev_score"] = score
         return "— (لا توجد مقارنة سابقة)"
@@ -52,13 +47,11 @@ def _trend_arrow(score, state):
     return tr
 
 def _top_event(events):
-    # أولوية: marine ثم ports(congested) ثم gdacs ثم dust
     for sec in ("marine", "ports", "gdacs", "dust"):
         for e in events:
             if e.get("section") != sec:
                 continue
             if sec == "ports":
-                # ✅ لا نعتبر الموانئ "أبرز حدث" إذا العدّ = 0 أو غير مزدحم
                 meta = e.get("meta") or {}
                 if meta.get("count", 0) <= 0:
                     continue
@@ -69,31 +62,81 @@ def _top_event(events):
 
 def _most_affected_areas(events):
     areas = []
-
-    # marine
     if any(e.get("section") == "marine" for e in events):
         areas.append("البحر الأحمر/الخليج (ملاحة)")
-
-    # ports: ✅ فقط إذا count > 0 (مو صفر)
     if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) > 0 for e in events):
         areas.append("الموانئ")
-
-    # gdacs
     if any(e.get("section") == "gdacs" for e in events):
         areas.append("الدول المجاورة")
-
-    # dust
     if any(e.get("section") == "dust" for e in events):
         areas.append("مدن داخل المملكة")
-
     return areas[:3]
+
+# ========= Risk Score (0-100) =========
+def _risk_score(events):
+    score = 0
+
+    for e in events:
+        sec = e.get("section", "")
+        meta = e.get("meta") or {}
+        title = e.get("title", "")
+
+        # dust weight
+        if sec == "dust":
+            pm = meta.get("max_pm10", meta.get("pm10", 0))
+            try:
+                pm = float(pm)
+            except Exception:
+                pm = 0
+            if pm >= 500:
+                score += 35
+            elif pm >= 300:
+                score += 25
+            elif pm >= 200:
+                score += 15
+            elif pm >= 150:
+                score += 8
+
+        # gdacs weight
+        if sec == "gdacs":
+            if "RED" in title:
+                score += 40
+            else:
+                score += 20
+
+        # marine weight
+        if sec == "marine":
+            score += 20
+
+        # ports weight (only if meaningful counts)
+        if sec == "ports":
+            c = int(meta.get("count", 0))
+            if c >= 30:
+                score += 20
+            elif c >= 15:
+                score += 10
+
+    return min(int(score), 100)
+
+def _risk_label(score):
+    if score >= 76:
+        return "🔴 حرج"
+    if score >= 51:
+        return "🟠 مرتفع"
+    if score >= 21:
+        return "🟡 مراقبة"
+    return "🟢 هادئ"
+# =====================================
 
 def build_official_report(events, state, report_no: str):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    status, score = _general_status_score(events)
-    trend = _trend_arrow(score, state)
+    status, _ = _general_status_score(events)
+    score_trend = _trend_arrow(_general_status_score(events)[1], state)
     top = _top_event(events)
     areas = _most_affected_areas(events)
+
+    risk = _risk_score(events)
+    risk_lbl = _risk_label(risk)
 
     lines = []
     lines.append("📄 تقرير الرصد والتحديث التشغيلي")
@@ -108,8 +151,11 @@ def build_official_report(events, state, report_no: str):
     lines.append("════════════════════")
     lines.append("1️⃣ الملخص التنفيذي")
     lines.append("")
+    lines.append(f"📊 مؤشر المخاطر الموحد: {risk}/100")
+    lines.append(f"📌 مستوى المخاطر: {risk_lbl}")
+    lines.append("")
     lines.append(f"📌 الحالة العامة: {status}")
-    lines.append(f"📈 مقارنة بالفترة السابقة: {trend}")
+    lines.append(f"📈 مقارنة بالفترة السابقة: {score_trend}")
     lines.append("")
     lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
     lines.append(top if top else "لا توجد أحداث مؤثرة ضمن نطاق الرصد.")
