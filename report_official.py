@@ -8,16 +8,14 @@ SECTION_ORDER = [
 ]
 
 # =========================
-#   Helpers
+# Helpers
 # =========================
 
 def _general_status_score(events):
     score = 0
     for e in events:
         sec = e.get("section", "")
-        t = (e.get("title") or "").lower()
-
-        if sec == "marine" or "ukmto" in t:
+        if sec == "marine":
             score += 3
         elif sec == "ports":
             c = (e.get("meta") or {}).get("count", 0)
@@ -59,8 +57,6 @@ def _top_event(events):
                 meta = e.get("meta") or {}
                 if meta.get("count", 0) <= 0:
                     continue
-                if not meta.get("congested", False):
-                    continue
             return e.get("title", "")
     return ""
 
@@ -77,14 +73,14 @@ def _most_affected_areas(events):
     return areas[:3]
 
 # =========================
-#   Risk Score (B logic)
+# Risk Score (B logic)
 # =========================
 
 def _risk_score(events):
 
     score = 0
 
-    # ===== Dust intelligent logic =====
+    # ---- Dust logic (ذكي)
     dust_events = [e for e in events if e.get("section") == "dust"]
     dust_cities = set()
     dust_levels = []
@@ -98,48 +94,30 @@ def _risk_score(events):
         pm = meta.get("max_pm10", meta.get("pm10", 0))
         try:
             pm = float(pm)
-        except Exception:
+        except:
             pm = 0
         dust_levels.append(pm)
 
     dust_city_count = len(dust_cities)
     dust_max = max(dust_levels) if dust_levels else 0
 
-    dust_strong = dust_max >= 300
-    dust_very_strong = dust_max >= 500
-
     if dust_events:
         if dust_city_count >= 3:
-            # انتشار واسع
-            if dust_very_strong:
-                score += 40
-            elif dust_strong:
-                score += 30
-            else:
-                score += 15
+            score += 40 if dust_max >= 500 else 30
         else:
-            # محلي
-            if dust_very_strong:
-                score += 22
-            elif dust_strong:
-                score += 16
-            else:
-                score += 8
+            score += 22 if dust_max >= 500 else 16
 
-    # ===== GDACS =====
+    # ---- GDACS
     for e in events:
         if e.get("section") == "gdacs":
             title = e.get("title", "")
-            if "RED" in title:
-                score += 40
-            else:
-                score += 20
+            score += 40 if "RED" in title else 20
 
-    # ===== Marine =====
+    # ---- Marine
     if any(e.get("section") == "marine" for e in events):
         score += 20
 
-    # ===== Ports =====
+    # ---- Ports
     for e in events:
         if e.get("section") != "ports":
             continue
@@ -160,7 +138,6 @@ def _risk_label(score):
         return "🟡 مراقبة"
     return "🟢 هادئ"
 
-# ⭐ التعديل الصغير النهائي
 def _status_from_risk(risk):
     if risk >= 76:
         return "حرجة"
@@ -171,7 +148,7 @@ def _status_from_risk(risk):
     return "هادئة"
 
 # =========================
-#   Report Builder
+# Report Builder
 # =========================
 
 def build_official_report(events, state, report_no):
@@ -218,11 +195,23 @@ def build_official_report(events, state, report_no):
         lines.append("- لا يوجد")
     lines.append("")
 
+    # ===== سلاسل الإمداد (بدون الغبار)
     lines.append("════════════════════")
     lines.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
     lines.append("")
-    if any(e.get("section") == "dust" for e in events):
-        lines.append("• غبار قوي محلي/محدود (مدينة أو مدينتين).")
+    bullets = []
+
+    if any(e.get("section") == "marine" for e in events):
+        bullets.append("• تحذير/حادث بحري قد يؤثر على حركة الشحن.")
+
+    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) >= 30 for e in events):
+        bullets.append("• ازدحام مرتفع في أحد الموانئ.")
+
+    if any(e.get("section") == "gdacs" for e in events):
+        bullets.append("• حدث إقليمي قد يؤثر على تدفق سلاسل الإمداد.")
+
+    if bullets:
+        lines.extend(bullets)
     else:
         lines.append("• لا توجد مؤشرات تشغيلية مؤثرة حالياً.")
     lines.append("")
