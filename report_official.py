@@ -15,14 +15,19 @@ def _general_status_score(events):
 
         if sec == "marine" or "ukmto" in t:
             score += 3
+
         elif sec == "ports":
             c = (e.get("meta") or {}).get("count", 0)
+            # ✅ لا نرفع النقاط إلا عند ازدحام حقيقي
             if c >= 30:
                 score += 2
+
         elif sec == "gdacs":
             score += 2
+
         elif sec == "dust":
             score += 1
+
     if score >= 7:
         return "نشاط مرتفع", score
     if score >= 3:
@@ -30,6 +35,11 @@ def _general_status_score(events):
     return "هادئة", score
 
 def _trend_arrow(score, state):
+    # ✅ أول تقرير: لا نقارن حتى ما يطلع ↑ بلا معنى
+    if "prev_score" not in state:
+        state["prev_score"] = score
+        return "— (لا توجد مقارنة سابقة)"
+
     prev = int(state.get("prev_score", 0))
     if score > prev:
         tr = "↑ تصاعد"
@@ -37,31 +47,45 @@ def _trend_arrow(score, state):
         tr = "↓ تراجع"
     else:
         tr = "→ مستقر"
+
     state["prev_score"] = score
     return tr
 
 def _top_event(events):
-    # أولوية بسيطة: marine ثم ports(congested) ثم gdacs ثم dust
+    # أولوية: marine ثم ports(congested) ثم gdacs ثم dust
     for sec in ("marine", "ports", "gdacs", "dust"):
         for e in events:
-            if e.get("section") == sec:
-                if sec == "ports" and not (e.get("meta") or {}).get("congested"):
+            if e.get("section") != sec:
+                continue
+            if sec == "ports":
+                # ✅ لا نعتبر الموانئ "أبرز حدث" إذا العدّ = 0 أو غير مزدحم
+                meta = e.get("meta") or {}
+                if meta.get("count", 0) <= 0:
                     continue
-                return e.get("title", "")
+                if not meta.get("congested", False):
+                    continue
+            return e.get("title", "")
     return ""
 
 def _most_affected_areas(events):
     areas = []
-    for e in events:
-        sec = e.get("section")
-        if sec == "marine" and "البحر الأحمر" not in areas:
-            areas.append("البحر الأحمر/الخليج (ملاحة)")
-        if sec == "ports" and "الموانئ" not in areas:
-            areas.append("الموانئ")
-        if sec == "gdacs" and "الدول المجاورة" not in areas:
-            areas.append("الدول المجاورة")
-        if sec == "dust" and "مدن داخل المملكة" not in areas:
-            areas.append("مدن داخل المملكة")
+
+    # marine
+    if any(e.get("section") == "marine" for e in events):
+        areas.append("البحر الأحمر/الخليج (ملاحة)")
+
+    # ports: ✅ فقط إذا count > 0 (مو صفر)
+    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) > 0 for e in events):
+        areas.append("الموانئ")
+
+    # gdacs
+    if any(e.get("section") == "gdacs" for e in events):
+        areas.append("الدول المجاورة")
+
+    # dust
+    if any(e.get("section") == "dust" for e in events):
+        areas.append("مدن داخل المملكة")
+
     return areas[:3]
 
 def build_official_report(events, state, report_no: str):
@@ -103,7 +127,7 @@ def build_official_report(events, state, report_no: str):
     bullets = []
     if any(e.get("section") == "marine" for e in events):
         bullets.append("• تحذير/حادث بحري قد يؤثر على حركة الشحن.")
-    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("congested") for e in events):
+    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) >= 30 for e in events):
         bullets.append("• ازدحام مرتفع في أحد الموانئ.")
     if any(e.get("section") == "dust" for e in events):
         bullets.append("• غبار قوي في مناطق تشغيلية.")
@@ -113,7 +137,6 @@ def build_official_report(events, state, report_no: str):
         lines.append("• لا توجد مؤشرات تشغيلية مؤثرة حالياً.")
     lines.append("")
 
-    # الأقسام
     grouped = {}
     for e in events:
         grouped.setdefault(e.get("section", "other"), []).append(e)
