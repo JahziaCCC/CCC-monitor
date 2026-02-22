@@ -3,7 +3,8 @@ from telegram import send
 from state import load_state, save_state, prune_seen, seen, mark_seen
 
 import mon_gdacs, mon_dust, mon_ukmto
-# AIS فقط للتقرير (اختياري)
+
+# AIS فقط للتقرير (اختياري لكن عندك مفتاح)
 try:
     import mon_ais_ports
     HAS_AIS = True
@@ -14,11 +15,19 @@ from report_official import build_official_report
 
 def collect_events(include_ais: bool):
     events = []
+    # مصادر مجانية
     events.extend(mon_gdacs.fetch())
     events.extend(mon_dust.fetch())
     events.extend(mon_ukmto.fetch())
+
+    # AIS: في التقرير فقط
     if include_ais and HAS_AIS:
-        events.extend(mon_ais_ports.fetch(sample_seconds=60))
+        try:
+            events.extend(mon_ais_ports.fetch(sample_seconds=120))
+        except Exception:
+            # لا نسقط التقرير لو AIS تعطل
+            pass
+
     return events
 
 def _report_no(state):
@@ -53,7 +62,7 @@ def run(label: str, only_if_new: bool, include_ais: bool):
     send(msg)
 
 def main():
-    # التقرير المجدول (دائم)
+    # التقرير المجدول (دائم) — يشمل AIS
     run("📌 تقرير مُجدول", only_if_new=False, include_ais=True)
 
 if __name__ == "__main__":
