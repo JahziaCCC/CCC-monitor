@@ -1,16 +1,27 @@
-import hashlib, requests, re
+import hashlib
+import requests
+import re
 
 def _fp(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:24]
 
 def fetch():
     url = "https://www.ukmto.org/recent-incidents"
-    r = requests.get(url, timeout=25)
-    r.raise_for_status()
-    html = r.text
 
-    hits = re.findall(r"(UKMTO[^<\n]{0,180})", html, flags=re.IGNORECASE)
-    hits = [re.sub(r"\s+", " ", h).strip() for h in hits]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; MonitoringBot/1.0)"
+    }
+
+    # ✅ لا توقف النظام لو الموقع منعنا
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        html = r.text
+    except Exception:
+        return []
+
+    hits = re.findall(r"(UKMTO[^<\\n]{0,180})", html, flags=re.IGNORECASE)
+    hits = [re.sub(r"\\s+", " ", h).strip() for h in hits]
     hits = list(dict.fromkeys(hits))
 
     items = []
@@ -22,4 +33,5 @@ def fetch():
             "link": url,
             "meta": {}
         })
+
     return items
