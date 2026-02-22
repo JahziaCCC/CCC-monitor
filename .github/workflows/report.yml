@@ -15,7 +15,7 @@ concurrency:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
 
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +36,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt --no-input --disable-pip-version-check
+
+      # ✅ الخطوة الرابعة: تشخيص AISStream (مؤقت)
+      - name: Diagnose AISStream (temporary)
+        env:
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+        run: python diagnose_ais.py
 
       - name: Run scheduled report
         env:
