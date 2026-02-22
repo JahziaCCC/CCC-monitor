@@ -1,6 +1,8 @@
-import hashlib, requests
+import hashlib
+import requests
 
 THRESH_PM10 = 200  # عتبة تشغيلية (عدّلها)
+PM10_HARD_CAP = 600  # ✅ سقف لتصفية القيم الشاذة (outliers)
 
 CITIES = [
     ("الرياض", 24.7136, 46.6753),
@@ -19,13 +21,23 @@ def fetch():
             "https://air-quality-api.open-meteo.com/v1/air-quality"
             f"?latitude={lat}&longitude={lon}&hourly=pm10&timezone=UTC"
         )
-        r = requests.get(url, timeout=25)
-        r.raise_for_status()
-        data = r.json()
+
+        try:
+            r = requests.get(url, timeout=25)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            continue
+
         pm10 = (data.get("hourly", {}).get("pm10") or [])
         if not pm10:
             continue
-        max_pm10 = max(pm10[:48]) if len(pm10) >= 48 else max(pm10)
+
+        # ✅ ناخذ أعلى قيمة في آخر 48 ساعة (أو أقل) ثم نطبق سقف منطقي
+        window = pm10[:48] if len(pm10) >= 48 else pm10
+        max_pm10 = max(window)
+        max_pm10 = min(max_pm10, PM10_HARD_CAP)
+
         if max_pm10 >= THRESH_PM10:
             title = f"🌪️ مؤشر غبار مرتفع — {name}: {max_pm10:.0f} µg/m³"
             items.append({
@@ -35,4 +47,5 @@ def fetch():
                 "link": "https://open-meteo.com/en/docs/air-quality-api",
                 "meta": {"city": name, "max_pm10": max_pm10}
             })
+
     return items
