@@ -8,13 +8,10 @@ SECTION_ORDER = [
 ]
 
 # =========================
-#   Helper scoring pieces
+#   Helpers
 # =========================
 
 def _general_status_score(events):
-    """
-    هذا السكور نستخدمه فقط للمقارنة (trend) وليس للحالة العامة بعد الآن.
-    """
     score = 0
     for e in events:
         sec = e.get("section", "")
@@ -80,18 +77,14 @@ def _most_affected_areas(events):
     return areas[:3]
 
 # =========================
-#   Risk Score (B Version)
+#   Risk Score (B logic)
 # =========================
 
 def _risk_score(events):
-    """
-    B: الغبار يكون "ذكي":
-    - إذا الغبار قوي في 1-2 مدينة: تأثير متوسط
-    - إذا الغبار قوي في 3+ مدن: تأثير كبير (لأنه واسع الانتشار)
-    """
+
     score = 0
 
-    # ---- Dust: evaluate spread (cities count) ----
+    # ===== Dust intelligent logic =====
     dust_events = [e for e in events if e.get("section") == "dust"]
     dust_cities = set()
     dust_levels = []
@@ -106,55 +99,51 @@ def _risk_score(events):
         try:
             pm = float(pm)
         except Exception:
-            pm = 0.0
+            pm = 0
         dust_levels.append(pm)
 
     dust_city_count = len(dust_cities)
-    dust_max = max(dust_levels) if dust_levels else 0.0
+    dust_max = max(dust_levels) if dust_levels else 0
 
-    # تعريف "قوي" تشغيليًا
-    dust_is_strong = dust_max >= 300  # 300+ قوي
-    dust_is_very_strong = dust_max >= 500  # 500+ شديد
+    dust_strong = dust_max >= 300
+    dust_very_strong = dust_max >= 500
 
     if dust_events:
         if dust_city_count >= 3:
-            # واسع الانتشار = تأثير عالي
-            if dust_is_very_strong:
+            # انتشار واسع
+            if dust_very_strong:
                 score += 40
-            elif dust_is_strong:
+            elif dust_strong:
                 score += 30
             else:
                 score += 15
         else:
-            # محلي/محدود (1-2 مدينة) = تأثير أقل
-            if dust_is_very_strong:
+            # محلي
+            if dust_very_strong:
                 score += 22
-            elif dust_is_strong:
+            elif dust_strong:
                 score += 16
             else:
                 score += 8
 
-    # ---- GDACS ----
+    # ===== GDACS =====
     for e in events:
-        if e.get("section") != "gdacs":
-            continue
-        title = e.get("title", "")
-        # لا يوجد GDACS في تقاريرك غالبًا، لكن نخليها جاهزة
-        if "RED" in title:
-            score += 40
-        else:
-            score += 20
+        if e.get("section") == "gdacs":
+            title = e.get("title", "")
+            if "RED" in title:
+                score += 40
+            else:
+                score += 20
 
-    # ---- Marine (UKMTO/بحري) ----
+    # ===== Marine =====
     if any(e.get("section") == "marine" for e in events):
         score += 20
 
-    # ---- Ports congestion (only if meaningful) ----
+    # ===== Ports =====
     for e in events:
         if e.get("section") != "ports":
             continue
-        meta = e.get("meta") or {}
-        c = int(meta.get("count", 0))
+        c = int((e.get("meta") or {}).get("count", 0))
         if c >= 30:
             score += 20
         elif c >= 15:
@@ -171,32 +160,29 @@ def _risk_label(score):
         return "🟡 مراقبة"
     return "🟢 هادئ"
 
+# ⭐ التعديل الصغير النهائي
 def _status_from_risk(risk):
-    # نجعل "الحالة العامة" متوافقة مع مؤشر المخاطر
     if risk >= 76:
         return "حرجة"
     if risk >= 51:
         return "نشاط مرتفع"
     if risk >= 21:
-        return "نشاط متوسط"
+        return "مراقبة"
     return "هادئة"
 
 # =========================
-#   Report builder
+#   Report Builder
 # =========================
 
-def build_official_report(events, state, report_no: str):
+def build_official_report(events, state, report_no):
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # Trend comparison (same as before)
     _, base_score = _general_status_score(events)
     trend = _trend_arrow(base_score, state)
 
-    # Risk score (new B logic)
     risk = _risk_score(events)
     risk_lbl = _risk_label(risk)
-
-    # Make status align with risk
     status = _status_from_risk(risk)
 
     top = _top_event(events)
@@ -231,29 +217,12 @@ def build_official_report(events, state, report_no: str):
     else:
         lines.append("- لا يوجد")
     lines.append("")
+
     lines.append("════════════════════")
     lines.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
     lines.append("")
-    bullets = []
-    if any(e.get("section") == "marine" for e in events):
-        bullets.append("• تحذير/حادث بحري قد يؤثر على حركة الشحن.")
-    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) >= 30 for e in events):
-        bullets.append("• ازدحام مرتفع في أحد الموانئ.")
     if any(e.get("section") == "dust" for e in events):
-        # في B نوضح هل الغبار واسع الانتشار أم محلي
-        dust_cities = set()
-        for e in events:
-            if e.get("section") == "dust":
-                city = (e.get("meta") or {}).get("city")
-                if city:
-                    dust_cities.add(city)
-        if len(dust_cities) >= 3:
-            bullets.append("• غبار قوي واسع الانتشار (عدة مدن).")
-        else:
-            bullets.append("• غبار قوي محلي/محدود (مدينة أو مدينتين).")
-
-    if bullets:
-        lines.extend(bullets)
+        lines.append("• غبار قوي محلي/محدود (مدينة أو مدينتين).")
     else:
         lines.append("• لا توجد مؤشرات تشغيلية مؤثرة حالياً.")
     lines.append("")
@@ -280,4 +249,5 @@ def build_official_report(events, state, report_no: str):
     lines.append("")
     lines.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
     lines.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
+
     return "\n".join(lines)
