@@ -14,24 +14,47 @@ PORTS = [
     {"name": "ميناء الجبيل التجاري", "lat": 27.00, "lon": 49.65, "radius_km": 35},
 ]
 
-CONGESTION_N = 30  # عتبة "ازدحام" (للتقرير)
+CONGESTION_N = 30
 
-def _fp(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:24]
+def _fp(s):
+    return hashlib.sha256(s.encode()).hexdigest()[:24]
 
-def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
     p1, p2 = math.radians(lat1), math.radians(lat2)
-    d1 = math.radians(lat2 - lat1)
-    d2 = math.radians(lon2 - lon1)
-    a = (math.sin(d1/2)**2) + math.cos(p1) * math.cos(p2) * (math.sin(d2/2)**2)
-    return 2 * R * math.asin(math.sqrt(a))
+    d1 = math.radians(lat2-lat1)
+    d2 = math.radians(lon2-lon1)
+    a = math.sin(d1/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(d2/2)**2
+    return 2*R*math.asin(math.sqrt(a))
 
-def fetch(sample_seconds: int = 120):
+def extract_position(msg):
     """
-    يجمع عدد السفن داخل نطاق نصف قطر حول كل ميناء خلال sample_seconds.
-    - إذا لا يوجد مفتاح أو فشل الاتصال: يرجع [] بدون إسقاط التشغيل.
+    يدعم جميع أنواع AIS position reports
     """
+    mmsi = msg.get("MMSI")
+
+    message = msg.get("Message") or msg.get("message") or {}
+
+    pos = (
+        message.get("PositionReport")
+        or message.get("PositionReportClassA")
+        or message.get("PositionReportClassB")
+        or message.get("StandardClassBPositionReport")
+    )
+
+    if not mmsi or not isinstance(pos, dict):
+        return None, None, None
+
+    lat = pos.get("Latitude")
+    lon = pos.get("Longitude")
+
+    if lat is None or lon is None:
+        return None, None, None
+
+    return str(mmsi), float(lat), float(lon)
+
+def fetch(sample_seconds=120):
+
     if not AIS_KEY:
         return []
 
@@ -40,41 +63,31 @@ def fetch(sample_seconds: int = 120):
     try:
         ws = create_connection("wss://stream.aisstream.io/v0/stream", timeout=40)
 
-        # ✅ stream عالمي ثم فلترة محلية حول الموانئ (أكثر ثباتاً من bbox كبير)
         ws.send(json.dumps({
             "APIKey": AIS_KEY,
-            "BoundingBoxes": [[[-90, -180], [90, 180]]]
+            "BoundingBoxes": [[[-90,-180],[90,180]]]
         }))
 
         start = time.time()
+
         while time.time() - start < sample_seconds:
+
             raw = ws.recv()
             if not raw:
                 continue
 
             try:
                 msg = json.loads(raw)
-            except Exception:
+            except:
                 continue
 
-            mmsi = msg.get("MMSI")
-            pos = msg.get("PositionReport")
-            if not mmsi or not isinstance(pos, dict):
-                continue
-
-            lat = pos.get("Latitude")
-            lon = pos.get("Longitude")
-            if lat is None or lon is None:
-                continue
-
-            try:
-                lat = float(lat); lon = float(lon)
-            except Exception:
+            mmsi, lat, lon = extract_position(msg)
+            if not mmsi:
                 continue
 
             for p in PORTS:
-                if haversine_km(lat, lon, p["lat"], p["lon"]) <= p["radius_km"]:
-                    counts[p["name"]].add(str(mmsi))
+                if haversine(lat, lon, p["lat"], p["lon"]) <= p["radius_km"]:
+                    counts[p["name"]].add(mmsi)
 
         ws.close()
 
@@ -82,15 +95,19 @@ def fetch(sample_seconds: int = 120):
         return []
 
     items = []
+
     for p in PORTS:
-        port_name = p["name"]
-        n = len(counts.get(port_name, set()))
+        n = len(counts[p["name"]])
         items.append({
-            "key": _fp(f"port|{port_name}|{n}"),
+            "key": _fp(f"{p['name']}|{n}"),
             "section": "ports",
-            "title": f"🚢 {port_name}: {n} سفينة داخل النطاق",
+            "title": f"🚢 {p['name']}: {n} سفينة داخل النطاق",
             "link": "https://aisstream.io/",
-            "meta": {"port": port_name, "count": n, "congested": n >= CONGESTION_N}
+            "meta": {
+                "port": p["name"],
+                "count": n,
+                "congested": n >= CONGESTION_N
+            }
         })
 
     return items
