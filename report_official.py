@@ -7,7 +7,14 @@ SECTION_ORDER = [
     ("dust",  "6️⃣ مؤشرات الغبار وجودة الهواء (PM10)"),
 ]
 
+# =========================
+#   Helper scoring pieces
+# =========================
+
 def _general_status_score(events):
+    """
+    هذا السكور نستخدمه فقط للمقارنة (trend) وليس للحالة العامة بعد الآن.
+    """
     score = 0
     for e in events:
         sec = e.get("section", "")
@@ -72,49 +79,86 @@ def _most_affected_areas(events):
         areas.append("مدن داخل المملكة")
     return areas[:3]
 
-# ========= Risk Score (0-100) =========
+# =========================
+#   Risk Score (B Version)
+# =========================
+
 def _risk_score(events):
+    """
+    B: الغبار يكون "ذكي":
+    - إذا الغبار قوي في 1-2 مدينة: تأثير متوسط
+    - إذا الغبار قوي في 3+ مدن: تأثير كبير (لأنه واسع الانتشار)
+    """
     score = 0
 
-    for e in events:
-        sec = e.get("section", "")
-        meta = e.get("meta") or {}
-        title = e.get("title", "")
+    # ---- Dust: evaluate spread (cities count) ----
+    dust_events = [e for e in events if e.get("section") == "dust"]
+    dust_cities = set()
+    dust_levels = []
 
-        # dust weight
-        if sec == "dust":
-            pm = meta.get("max_pm10", meta.get("pm10", 0))
-            try:
-                pm = float(pm)
-            except Exception:
-                pm = 0
-            if pm >= 500:
-                score += 35
-            elif pm >= 300:
-                score += 25
-            elif pm >= 200:
+    for e in dust_events:
+        meta = e.get("meta") or {}
+        city = meta.get("city")
+        if city:
+            dust_cities.add(city)
+
+        pm = meta.get("max_pm10", meta.get("pm10", 0))
+        try:
+            pm = float(pm)
+        except Exception:
+            pm = 0.0
+        dust_levels.append(pm)
+
+    dust_city_count = len(dust_cities)
+    dust_max = max(dust_levels) if dust_levels else 0.0
+
+    # تعريف "قوي" تشغيليًا
+    dust_is_strong = dust_max >= 300  # 300+ قوي
+    dust_is_very_strong = dust_max >= 500  # 500+ شديد
+
+    if dust_events:
+        if dust_city_count >= 3:
+            # واسع الانتشار = تأثير عالي
+            if dust_is_very_strong:
+                score += 40
+            elif dust_is_strong:
+                score += 30
+            else:
                 score += 15
-            elif pm >= 150:
+        else:
+            # محلي/محدود (1-2 مدينة) = تأثير أقل
+            if dust_is_very_strong:
+                score += 22
+            elif dust_is_strong:
+                score += 16
+            else:
                 score += 8
 
-        # gdacs weight
-        if sec == "gdacs":
-            if "RED" in title:
-                score += 40
-            else:
-                score += 20
-
-        # marine weight
-        if sec == "marine":
+    # ---- GDACS ----
+    for e in events:
+        if e.get("section") != "gdacs":
+            continue
+        title = e.get("title", "")
+        # لا يوجد GDACS في تقاريرك غالبًا، لكن نخليها جاهزة
+        if "RED" in title:
+            score += 40
+        else:
             score += 20
 
-        # ports weight (only if meaningful counts)
-        if sec == "ports":
-            c = int(meta.get("count", 0))
-            if c >= 30:
-                score += 20
-            elif c >= 15:
-                score += 10
+    # ---- Marine (UKMTO/بحري) ----
+    if any(e.get("section") == "marine" for e in events):
+        score += 20
+
+    # ---- Ports congestion (only if meaningful) ----
+    for e in events:
+        if e.get("section") != "ports":
+            continue
+        meta = e.get("meta") or {}
+        c = int(meta.get("count", 0))
+        if c >= 30:
+            score += 20
+        elif c >= 15:
+            score += 10
 
     return min(int(score), 100)
 
@@ -126,17 +170,37 @@ def _risk_label(score):
     if score >= 21:
         return "🟡 مراقبة"
     return "🟢 هادئ"
-# =====================================
+
+def _status_from_risk(risk):
+    # نجعل "الحالة العامة" متوافقة مع مؤشر المخاطر
+    if risk >= 76:
+        return "حرجة"
+    if risk >= 51:
+        return "نشاط مرتفع"
+    if risk >= 21:
+        return "نشاط متوسط"
+    return "هادئة"
+
+# =========================
+#   Report builder
+# =========================
 
 def build_official_report(events, state, report_no: str):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    status, _ = _general_status_score(events)
-    score_trend = _trend_arrow(_general_status_score(events)[1], state)
-    top = _top_event(events)
-    areas = _most_affected_areas(events)
 
+    # Trend comparison (same as before)
+    _, base_score = _general_status_score(events)
+    trend = _trend_arrow(base_score, state)
+
+    # Risk score (new B logic)
     risk = _risk_score(events)
     risk_lbl = _risk_label(risk)
+
+    # Make status align with risk
+    status = _status_from_risk(risk)
+
+    top = _top_event(events)
+    areas = _most_affected_areas(events)
 
     lines = []
     lines.append("📄 تقرير الرصد والتحديث التشغيلي")
@@ -155,7 +219,7 @@ def build_official_report(events, state, report_no: str):
     lines.append(f"📌 مستوى المخاطر: {risk_lbl}")
     lines.append("")
     lines.append(f"📌 الحالة العامة: {status}")
-    lines.append(f"📈 مقارنة بالفترة السابقة: {score_trend}")
+    lines.append(f"📈 مقارنة بالفترة السابقة: {trend}")
     lines.append("")
     lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
     lines.append(top if top else "لا توجد أحداث مؤثرة ضمن نطاق الرصد.")
@@ -176,7 +240,18 @@ def build_official_report(events, state, report_no: str):
     if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) >= 30 for e in events):
         bullets.append("• ازدحام مرتفع في أحد الموانئ.")
     if any(e.get("section") == "dust" for e in events):
-        bullets.append("• غبار قوي في مناطق تشغيلية.")
+        # في B نوضح هل الغبار واسع الانتشار أم محلي
+        dust_cities = set()
+        for e in events:
+            if e.get("section") == "dust":
+                city = (e.get("meta") or {}).get("city")
+                if city:
+                    dust_cities.add(city)
+        if len(dust_cities) >= 3:
+            bullets.append("• غبار قوي واسع الانتشار (عدة مدن).")
+        else:
+            bullets.append("• غبار قوي محلي/محدود (مدينة أو مدينتين).")
+
     if bullets:
         lines.extend(bullets)
     else:
