@@ -10,6 +10,18 @@ from sa_polygon import SAUDI_POLYGON, point_in_polygon
 MIN_MAG = 3.0
 LOOKBACK_HOURS = 24
 
+# كلمات استبعاد إضافية (فلتر أمان)
+BLOCKED_COUNTRIES = [
+    "iran",
+    "iraq",
+    "kuwait",
+    "bahrain",
+    "qatar",
+    "oman",
+    "yemen",
+    "jordan",
+    "egypt",
+]
 
 # =====================================
 # جلب بيانات USGS
@@ -40,6 +52,21 @@ def fetch_usgs():
 
 
 # =====================================
+# فلترة النص (أمان إضافي)
+# =====================================
+
+def blocked_place(place):
+
+    p = place.lower()
+
+    for c in BLOCKED_COUNTRIES:
+        if c in p:
+            return True
+
+    return False
+
+
+# =====================================
 # تحويل الأحداث
 # =====================================
 
@@ -60,7 +87,7 @@ def fetch():
         lon = float(coords[0])
         lat = float(coords[1])
 
-        # ⭐ الفلترة الحقيقية
+        # ⭐ فلترة جغرافية حقيقية
         if not point_in_polygon(lat, lon, SAUDI_POLYGON):
             continue
 
@@ -77,6 +104,10 @@ def fetch():
             continue
 
         place = props.get("place", "داخل المملكة")
+
+        # ⭐ فلتر أمان ضد الدول المجاورة
+        if blocked_place(place):
+            continue
 
         t_ms = props.get("time")
         if t_ms:
