@@ -10,21 +10,19 @@ def _now_utc():
 
 def _gdacs_weight(title: str):
     """
-    وزن GDACS حسب علاقتها بالسعودية
+    وزن GDACS حسب علاقتها بالسعودية:
+    - إذا ذكر السعودية صراحة: 1.0
+    - غير ذلك: 0.3 (وعي إقليمي منخفض التأثير)
     """
-
     t = (title or "").lower()
 
-    # ذكر السعودية صراحة = تأثير كامل
     if "saudi" in t or "saudi arabia" in t:
         return 1.0
 
-    # غير ذلك = تأثير إقليمي منخفض
     return 0.3
 
 
 def _risk_level(score):
-
     if score >= 75:
         return "🔴 حرج", "حرجة"
     elif score >= 50:
@@ -37,10 +35,13 @@ def _risk_level(score):
 
 def _dust_risk_points(dust_events):
     """
-    حساب ذكي للغبار:
-    حسب الانتشار وليس عدد المدن فقط
+    حساب ذكي للغبار كنطاق انتشار:
+    - 1-2 مدن: 10
+    - 3-4 مدن: 20
+    - 5+ مدن: 30
+    - إذا max_pm10 >= 800: +10
+    سقف: 40
     """
-
     if not dust_events:
         return 0
 
@@ -48,7 +49,6 @@ def _dust_risk_points(dust_events):
     max_pm10 = 0
 
     for e in dust_events:
-
         meta = e.get("meta") or {}
 
         city = meta.get("city")
@@ -58,7 +58,7 @@ def _dust_risk_points(dust_events):
         v = meta.get("max_pm10", meta.get("pm10", 0))
         try:
             v = float(v)
-        except:
+        except Exception:
             v = 0
 
         if v > max_pm10:
@@ -66,7 +66,6 @@ def _dust_risk_points(dust_events):
 
     n = len(cities)
 
-    # انتشار الغبار
     if n <= 2:
         pts = 10
     elif n <= 4:
@@ -74,11 +73,43 @@ def _dust_risk_points(dust_events):
     else:
         pts = 30
 
-    # شدة عالية جداً
     if max_pm10 >= 800:
         pts += 10
 
     return min(pts, 40)
+
+
+def _gdacs_mentions_saudi(gdacs_lines):
+    """
+    True إذا أي سطر GDACS يذكر السعودية صراحة
+    """
+    for line in gdacs_lines:
+        t = (line or "").lower()
+        if "saudi" in t or "saudi arabia" in t:
+            return True
+    return False
+
+
+def _top_dust_event(dust_events):
+    """
+    يرجع عنوان أعلى غبار بناء على أعلى pm10
+    """
+    best_title = None
+    best_val = -1
+
+    for e in dust_events:
+        meta = e.get("meta") or {}
+        v = meta.get("max_pm10", meta.get("pm10", 0))
+        try:
+            v = float(v)
+        except Exception:
+            v = 0
+
+        if v > best_val:
+            best_val = v
+            best_title = e.get("title", "")
+
+    return best_title or "لا يوجد"
 
 
 # =====================================
@@ -97,17 +128,15 @@ def build_official_report(events, state, report_no):
     dust_events = []
 
     # =============================
-    # تصنيف الأحداث
+    # تصنيف الأحداث + حساب المخاطر
     # =============================
 
     for e in events:
-
         section = e.get("section", "")
         title = e.get("title", "")
 
         if section == "gdacs":
             gdacs_lines.append(f"- {title}")
-
             w = _gdacs_weight(title)
             risk_score += int(30 * w)
 
@@ -123,23 +152,25 @@ def build_official_report(events, state, report_no):
             dust_lines.append(f"- {title}")
             dust_events.append(e)
 
-    # ⭐ حساب الغبار الذكي
+    # ⭐ نقاط الغبار الذكية
     risk_score += _dust_risk_points(dust_events)
-
     risk_score = min(risk_score, 100)
 
     risk_icon, general_state = _risk_level(risk_score)
 
     # =============================
-    # أبرز حدث
+    # أبرز حدث خلال آخر 6 ساعات (التحسين المطلوب)
     # =============================
 
     top_event = "لا يوجد"
 
-    if gdacs_lines:
+    if gdacs_lines and _gdacs_mentions_saudi(gdacs_lines):
         top_event = gdacs_lines[0].replace("- ", "")
-    elif dust_lines:
-        top_event = dust_lines[0].replace("- ", "")
+    elif dust_events:
+        top_event = _top_dust_event(dust_events)
+    elif gdacs_lines:
+        # إذا GDACS موجود لكن لا يذكر السعودية، نظهره فقط عند عدم وجود غبار
+        top_event = gdacs_lines[0].replace("- ", "")
 
     # =============================
     # بناء النص
