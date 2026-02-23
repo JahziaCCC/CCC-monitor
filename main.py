@@ -1,127 +1,130 @@
+import os
+import json
+import hashlib
 from datetime import datetime, timezone
-from telegram import send
-from state import load_state, save_state, prune_seen, seen, mark_seen
 
-import mon_gdacs, mon_dust, mon_ukmto
+import requests
+
+import report_official
+
+# الموديولات (إذا عندك بعضها باسم مختلف، غيّر الاسم هنا فقط)
+import mon_dust
+# اختياري: إذا عندك هذه الملفات بالفعل
+try:
+    import mon_gdacs
+except Exception:
+    mon_gdacs = None
+
+try:
+    import mon_ukmto
+except Exception:
+    mon_ukmto = None
 
 try:
     import mon_ais_ports
-    HAS_AIS = True
 except Exception:
-    HAS_AIS = False
+    mon_ais_ports = None
 
-from report_official import build_official_report
+# ✅ الزلازل
+import mon_quakes
 
-# ===== إعدادات تنبيه ازدحام الموانئ =====
-PORT_ALERT_ABS = 25   # تنبيه إذا وصل العدد لهذا الرقم أو أكثر
-PORT_ALERT_JUMP = 10  # تنبيه إذا زاد فجأة بهذا المقدار أو أكثر
-AIS_SAMPLE_SECONDS = 120  # مدة جمع AIS للتقرير
-# =======================================
 
-def collect_events(include_ais: bool):
+BOT = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+STATE_FILE = "mewa_state.json"
+
+
+def _load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _send_telegram(text: str):
+    url = f"https://api.telegram.org/bot{BOT}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True
+    }
+    r = requests.post(url, json=payload, timeout=25)
+    r.raise_for_status()
+
+
+def _next_report_no(state):
+    # مثال: RPT-20260222-013
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    n = int(state.get("report_seq", 0)) + 1
+    state["report_seq"] = n
+    return f"RPT-{today}-{n:03d}"
+
+
+def _dedupe_key(text: str):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
+def main():
+    state = _load_state()
     events = []
-    events.extend(mon_gdacs.fetch())
-    events.extend(mon_dust.fetch())
-    events.extend(mon_ukmto.fetch())
 
-    if include_ais and HAS_AIS:
+    # 1) الغبار
+    try:
+        events += mon_dust.fetch()
+    except Exception:
+        pass
+
+    # 2) GDACS (اختياري)
+    if mon_gdacs:
         try:
-            events.extend(mon_ais_ports.fetch(sample_seconds=AIS_SAMPLE_SECONDS))
+            events += mon_gdacs.fetch()
         except Exception:
             pass
 
-    return events
+    # 3) UKMTO (اختياري)
+    if mon_ukmto:
+        try:
+            events += mon_ukmto.fetch()
+        except Exception:
+            pass
 
-def _report_no(state):
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    key = f"rpt_seq_{today}"
-    state[key] = int(state.get(key, 0)) + 1
-    return f"RPT-{today}-{state[key]:03d}"
+    # 4) AIS Ports (اختياري)
+    if mon_ais_ports:
+        try:
+            events += mon_ais_ports.fetch()
+        except Exception:
+            pass
 
-def _ports_congestion_alert(events, state):
-    """
-    يرجع رسالة تنبيه إذا كان هناك ازدحام/قفزة في أحد الموانئ.
-    يعتمد على عناصر section=ports وبداخل meta.port + meta.count.
-    """
-    ports_state = state.setdefault("ports_last_counts", {})
-    alerts = []
+    # ✅ 5) زلازل USGS داخل السعودية (≥ 3.0)
+    try:
+        events += mon_quakes.fetch()
+    except Exception:
+        pass
 
-    for e in events:
-        if e.get("section") != "ports":
-            continue
+    report_no = _next_report_no(state)
+    report_text = report_official.build_official_report(events, state, report_no)
 
-        meta = e.get("meta") or {}
-        port_name = meta.get("port") or "ميناء"
-        current = int(meta.get("count", 0))
-
-        prev = int(ports_state.get(port_name, 0))
-        jump = current - prev
-
-        # تحديث آخر قراءة
-        ports_state[port_name] = current
-
-        # شروط التنبيه
-        if current >= PORT_ALERT_ABS:
-            alerts.append(f"🚢 ازدحام مرتفع: {port_name}\n• العدد الحالي: {current} سفينة")
-        elif jump >= PORT_ALERT_JUMP:
-            alerts.append(
-                f"📈 قفزة في الازدحام: {port_name}\n"
-                f"• السابق: {prev} سفينة\n"
-                f"• الحالي: {current} سفينة\n"
-                f"• الزيادة: +{jump}"
-            )
-
-    if not alerts:
-        return None
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    msg = (
-        "🚨 تنبيه تشغيلي – ازدحام الموانئ (AIS)\n"
-        f"🕒 {now}\n\n"
-        + "\n\n".join(alerts)
-    )
-    return msg
-
-def run(label: str, only_if_new: bool, include_ais: bool):
-    state = load_state()
-    prune_seen(state, days=30)
-
-    events = collect_events(include_ais=include_ais)
-
-    # حساب الجديد لمنع السبام في alerts workflow
-    new_count = 0
-    for e in events:
-        k = e.get("key")
-        if not k:
-            continue
-        if not seen(state, k):
-            mark_seen(state, k)
-            new_count += 1
-
-    # تنبيه ازدحام الموانئ (إذا include_ais)
-    ports_alert_msg = None
-    if include_ais:
-        ports_alert_msg = _ports_congestion_alert(events, state)
-
-    # إذا كان هذا تشغيل تنبيهات فقط: لا ترسل شيء إذا لا جديد ولا تنبيه ازدحام
-    if only_if_new and new_count == 0 and not ports_alert_msg:
-        save_state(state)
+    # منع التكرار إذا نفس النص (اختياري لكنه مفيد)
+    key = _dedupe_key(report_text)
+    if state.get("last_report_key") == key:
+        # لا نرسل نفس التقرير
+        _save_state(state)
         return
 
-    # إرسال التنبيه أولاً (إن وجد)
-    if ports_alert_msg:
-        send(ports_alert_msg)
+    state["last_report_key"] = key
+    _save_state(state)
 
-    # إرسال التقرير الرسمي
-    rpt_no = _report_no(state)
-    msg = build_official_report(events, state, rpt_no)
+    _send_telegram(report_text)
 
-    save_state(state)
-    send(msg)
-
-def main():
-    # التقرير المجدول (دائم) — يشمل AIS
-    run("📌 تقرير مُجدول", only_if_new=False, include_ais=True)
 
 if __name__ == "__main__":
     main()
