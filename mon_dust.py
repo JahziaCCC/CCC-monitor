@@ -1,98 +1,82 @@
+# mon_dust.py
+import os
 import requests
 
-# =====================================
-# المدن والمناطق المعتمدة للرصد
-# =====================================
-
+# ✅ 15 موقع (13 منطقة + نيوم + العلا) + القريات (ضمن الحدود الشمالية) + حائل
+# ملاحظة: نستخدم مدينة/نقطة ممثلة للمنطقة
 CITIES = [
-
-    # الوسطى
-    {"name": "الرياض", "lat": 24.7136, "lon": 46.6753},
-    {"name": "القصيم", "lat": 26.3260, "lon": 43.9750},
-
-    # الغربية
-    {"name": "جدة", "lat": 21.5433, "lon": 39.1728},
-    {"name": "مكة", "lat": 21.3891, "lon": 39.8579},
-    {"name": "المدينة", "lat": 24.5247, "lon": 39.5692},
-    {"name": "العلا", "lat": 26.6084, "lon": 37.9230},
-
-    # الشمالية
-    {"name": "تبوك", "lat": 28.3998, "lon": 36.5715},
-    {"name": "القريات", "lat": 31.3318, "lon": 37.3428},
-    {"name": "الحدود الشمالية (عرعر)", "lat": 30.9753, "lon": 41.0381},
-    {"name": "حائل", "lat": 27.5114, "lon": 41.7208},
-    {"name": "نيوم", "lat": 28.1055, "lon": 35.0210},
-
-    # الشرقية
-    {"name": "الدمام", "lat": 26.4207, "lon": 50.0888},
-    {"name": "الأحساء", "lat": 25.3838, "lon": 49.5861},
-
-    # الجنوبية
-    {"name": "أبها", "lat": 18.2465, "lon": 42.5117},
-    {"name": "جازان", "lat": 16.8892, "lon": 42.5511},
+    ("الرياض", 24.7136, 46.6753),
+    ("مكة", 21.3891, 39.8579),
+    ("المدينة", 24.5247, 39.5692),
+    ("جدة", 21.4858, 39.1925),
+    ("المنطقة الشرقية (الدمام)", 26.4207, 50.0888),
+    ("القصيم (بريدة)", 26.3592, 43.9818),
+    ("عسير (أبها)", 18.2465, 42.5117),
+    ("جازان", 16.8892, 42.5706),
+    ("نجران", 17.5656, 44.2289),
+    ("الباحة", 20.0129, 41.4677),
+    ("تبوك", 28.3835, 36.5662),
+    ("الجوف (سكاكا)", 29.9697, 40.2064),
+    ("حائل", 27.5114, 41.7208),
+    ("الحدود الشمالية (عرعر)", 30.9753, 41.0381),
+    ("القريات", 31.3319, 37.3428),
+    ("العلا", 26.6085, 37.9232),
+    ("نيوم", 28.1700, 35.2500),
 ]
 
-# =====================================
-# جلب بيانات PM10
-# =====================================
+# Open-Meteo (مجاني) - PM10
+OPEN_METEO_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-def fetch_pm10(lat, lon):
-    url = (
-        "https://air-quality-api.open-meteo.com/v1/air-quality"
-        f"?latitude={lat}&longitude={lon}"
-        "&hourly=pm10"
-    )
+# حد التنبيه
+PM10_HIGH = float(os.environ.get("PM10_HIGH", "300"))  # تقدر تغيّرها من Secrets لو تبغى
 
-    try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
-        values = data.get("hourly", {}).get("pm10", [])
-        values = [v for v in values if v is not None]
-
-        if not values:
-            return None
-
-        return max(values[-6:])  # آخر 6 ساعات
-
-    except Exception:
+def _get_pm10(lat, lon):
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "pm10",
+        "timezone": "UTC",
+        "past_days": 1
+    }
+    r = requests.get(OPEN_METEO_URL, params=params, timeout=25)
+    r.raise_for_status()
+    data = r.json()
+    pm10 = data.get("hourly", {}).get("pm10", [])
+    if not pm10:
         return None
-
-
-# =====================================
-# إنشاء الأحداث
-# =====================================
-
-def collect_dust_events():
-
-    events = []
-
-    for city in CITIES:
-
-        pm10 = fetch_pm10(city["lat"], city["lon"])
-
-        if pm10 is None:
-            continue
-
-        # فقط القيم المرتفعة
-        if pm10 >= 300:
-            events.append({
-                "section": "dust",
-                "title": f"🌪️ مؤشر غبار مرتفع — {city['name']}: {int(pm10)} µg/m³",
-                "meta": {
-                    "city": city["name"],
-                    "pm10": pm10,
-                    "max_pm10": pm10
-                }
-            })
-
-    return events
-
-
-# =====================================
-# توافق مع main.py
-# =====================================
+    # آخر قراءة
+    return pm10[-1]
 
 def fetch():
-    return collect_dust_events()
+    events = []
+    for name, lat, lon in CITIES:
+        try:
+            val = _get_pm10(lat, lon)
+            if val is None:
+                continue
+
+            # نص موحّد مثل تقاريرك
+            if val >= PM10_HIGH:
+                events.append({
+                    "section": "dust",
+                    "title": f"🌪️ مؤشر غبار مرتفع — {name}: {int(round(val))} µg/m³"
+                })
+            else:
+                # لو تبغى تعرض كل المدن حتى لو منخفضة، قلّي وأفعّلها
+                pass
+
+        except Exception as e:
+            events.append({
+                "section": "dust",
+                "title": f"⚠️ تعذر قراءة PM10 — {name}: {e}"
+            })
+
+    # ترتيب تنازلي حسب الرقم
+    def _val(t):
+        # استخراج رقم من العنوان
+        import re
+        m = re.findall(r"\d+", t)
+        return int(m[-1]) if m else 0
+
+    events.sort(key=lambda x: _val(x.get("title", "")), reverse=True)
+    return events
