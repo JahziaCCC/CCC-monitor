@@ -1,9 +1,10 @@
 # mon_dust.py
 import os
+import time
 import requests
+import re
 
-# ✅ 15 موقع (13 منطقة + نيوم + العلا) + القريات (ضمن الحدود الشمالية) + حائل
-# ملاحظة: نستخدم مدينة/نقطة ممثلة للمنطقة
+# ✅ نقاط تمثيلية (15) — عدّلها كما تريد
 CITIES = [
     ("الرياض", 24.7136, 46.6753),
     ("مكة", 21.3891, 39.8579),
@@ -24,13 +25,17 @@ CITIES = [
     ("نيوم", 28.1700, 35.2500),
 ]
 
-# Open-Meteo (مجاني) - PM10
 OPEN_METEO_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-# حد التنبيه
-PM10_HIGH = float(os.environ.get("PM10_HIGH", "300"))  # تقدر تغيّرها من Secrets لو تبغى
+PM10_HIGH = float(os.environ.get("PM10_HIGH", "300"))         # حد “مرتفع”
+PM10_VERY_HIGH = float(os.environ.get("PM10_VERY_HIGH", "1500"))  # “شديد جداً” للتنبيه
 
-def _get_pm10(lat, lon):
+# إعدادات مقاومة التعطل
+REQ_TIMEOUT = int(os.environ.get("DUST_TIMEOUT", "40"))   # 40s بدل 25
+RETRIES = int(os.environ.get("DUST_RETRIES", "3"))        # إعادة المحاولة
+SLEEP_BETWEEN = float(os.environ.get("DUST_SLEEP", "1.2"))# تهدئة بسيطة بين المدن
+
+def _request_pm10(lat, lon):
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -38,45 +43,62 @@ def _get_pm10(lat, lon):
         "timezone": "UTC",
         "past_days": 1
     }
-    r = requests.get(OPEN_METEO_URL, params=params, timeout=25)
-    r.raise_for_status()
-    data = r.json()
-    pm10 = data.get("hourly", {}).get("pm10", [])
-    if not pm10:
-        return None
-    # آخر قراءة
-    return pm10[-1]
+
+    last_err = None
+    for i in range(RETRIES):
+        try:
+            r = requests.get(OPEN_METEO_URL, params=params, timeout=REQ_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            pm10 = data.get("hourly", {}).get("pm10", [])
+            if not pm10:
+                return None
+            return pm10[-1]
+        except Exception as e:
+            last_err = e
+            # backoff بسيط
+            time.sleep(0.8 * (i + 1))
+
+    # بعد كل المحاولات
+    raise last_err
 
 def fetch():
     events = []
+    failed = []
+
     for name, lat, lon in CITIES:
         try:
-            val = _get_pm10(lat, lon)
+            val = _request_pm10(lat, lon)
+
             if val is None:
-                continue
-
-            # نص موحّد مثل تقاريرك
-            if val >= PM10_HIGH:
-                events.append({
-                    "section": "dust",
-                    "title": f"🌪️ مؤشر غبار مرتفع — {name}: {int(round(val))} µg/m³"
-                })
+                failed.append(name)
             else:
-                # لو تبغى تعرض كل المدن حتى لو منخفضة، قلّي وأفعّلها
-                pass
+                v = int(round(val))
+                if v >= PM10_HIGH:
+                    events.append({
+                        "section": "dust",
+                        "title": f"🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³",
+                        "value": v
+                    })
+        except Exception:
+            failed.append(name)
 
-        except Exception as e:
-            events.append({
-                "section": "dust",
-                "title": f"⚠️ تعذر قراءة PM10 — {name}: {e}"
-            })
+        time.sleep(SLEEP_BETWEEN)
 
-    # ترتيب تنازلي حسب الرقم
-    def _val(t):
-        # استخراج رقم من العنوان
-        import re
-        m = re.findall(r"\d+", t)
-        return int(m[-1]) if m else 0
+    # ترتيب تنازلي
+    events.sort(key=lambda x: int(x.get("value", 0)), reverse=True)
 
-    events.sort(key=lambda x: _val(x.get("title", "")), reverse=True)
+    # ✅ لا نطبع أخطاء داخل التقرير (بدون تشويش)
+    # لو فشلت مدن، نضيف ملاحظة واحدة مختصرة “غير مؤثرة”
+    if failed:
+        events.append({
+            "section": "dust",
+            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {len(failed)} مواقع (مؤقتاً).",
+            "value": -1
+        })
+
+    # لو ما فيه أي غبار مرتفع
+    if not any(e.get("value", 0) >= PM10_HIGH for e in events):
+        return []
+
     return events
