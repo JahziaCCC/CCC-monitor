@@ -9,16 +9,9 @@ def _now_utc():
 
 
 def _gdacs_weight(title: str):
-    """
-    وزن GDACS حسب علاقتها بالسعودية:
-    - إذا ذكر السعودية صراحة: 1.0
-    - غير ذلك: 0.3 (وعي إقليمي منخفض التأثير)
-    """
     t = (title or "").lower()
-
     if "saudi" in t or "saudi arabia" in t:
         return 1.0
-
     return 0.3
 
 
@@ -33,24 +26,40 @@ def _risk_level(score):
         return "🟢 منخفض", "هادئة"
 
 
-def _dust_risk_points(dust_events):
-    """
-    حساب ذكي للغبار كنطاق انتشار:
-    - 1-2 مدن: 10
-    - 3-4 مدن: 20
-    - 5+ مدن: 30
-    - إذا max_pm10 >= 800: +10
-    سقف: 40
-    """
+def _gdacs_mentions_saudi(gdacs_lines):
+    for line in gdacs_lines:
+        t = (line or "").lower()
+        if "saudi" in t or "saudi arabia" in t:
+            return True
+    return False
+
+
+def _top_dust_event(dust_events):
+    best_title = None
+    best_val = -1
+    for e in dust_events:
+        meta = e.get("meta") or {}
+        v = meta.get("max_pm10", meta.get("pm10", 0))
+        try:
+            v = float(v)
+        except Exception:
+            v = 0
+        if v > best_val:
+            best_val = v
+            best_title = e.get("title", "")
+    return best_title or "لا يوجد"
+
+
+def _dust_summary(dust_events):
     if not dust_events:
-        return 0
+        return None
 
     cities = set()
-    max_pm10 = 0
+    max_city = None
+    max_pm10 = -1
 
     for e in dust_events:
         meta = e.get("meta") or {}
-
         city = meta.get("city")
         if city:
             cities.add(city)
@@ -63,8 +72,22 @@ def _dust_risk_points(dust_events):
 
         if v > max_pm10:
             max_pm10 = v
+            max_city = city or ""
 
-    n = len(cities)
+    return {
+        "count": len(cities) if cities else len(dust_events),
+        "max_city": max_city,
+        "max_pm10": int(max_pm10) if max_pm10 >= 0 else None
+    }
+
+
+def _dust_risk_points(dust_events):
+    if not dust_events:
+        return 0
+
+    summary = _dust_summary(dust_events) or {}
+    n = summary.get("count", 0)
+    max_pm10 = summary.get("max_pm10", 0) or 0
 
     if n <= 2:
         pts = 10
@@ -79,37 +102,59 @@ def _dust_risk_points(dust_events):
     return min(pts, 40)
 
 
-def _gdacs_mentions_saudi(gdacs_lines):
+def _operational_explanation(risk_score, gdacs_lines, dust_events, ukmto_lines, ais_lines):
     """
-    True إذا أي سطر GDACS يذكر السعودية صراحة
+    تفسير تشغيلي مختصر يوضح ما الذي رفع/خفض المخاطر
     """
-    for line in gdacs_lines:
-        t = (line or "").lower()
-        if "saudi" in t or "saudi arabia" in t:
-            return True
-    return False
+    bullets = []
 
+    # العامل الرئيسي
+    dust_pts = _dust_risk_points(dust_events)
+    gdacs_pts = int(30 * _gdacs_weight((gdacs_lines[0] if gdacs_lines else "")))
+    ukmto_pts = 20 if ukmto_lines else 0
+    ais_pts = 15 if ais_lines else 0
 
-def _top_dust_event(dust_events):
-    """
-    يرجع عنوان أعلى غبار بناء على أعلى pm10
-    """
-    best_title = None
-    best_val = -1
+    # تحديد أكبر مساهمة
+    contribs = [
+        ("الغبار داخل المملكة", dust_pts),
+        ("GDACS (كوارث طبيعية)", gdacs_pts if gdacs_lines else 0),
+        ("UKMTO (بحري)", ukmto_pts),
+        ("AIS (ازدحام/حركة موانئ)", ais_pts),
+    ]
+    contribs_sorted = sorted(contribs, key=lambda x: x[1], reverse=True)
+    main_factor, main_pts = contribs_sorted[0]
 
-    for e in dust_events:
-        meta = e.get("meta") or {}
-        v = meta.get("max_pm10", meta.get("pm10", 0))
-        try:
-            v = float(v)
-        except Exception:
-            v = 0
+    if main_pts > 0:
+        bullets.append(f"• العامل الرئيسي: {main_factor}.")
 
-        if v > best_val:
-            best_val = v
-            best_title = e.get("title", "")
+    # تفصيل الغبار
+    if dust_events:
+        s = _dust_summary(dust_events) or {}
+        c = s.get("count")
+        mc = s.get("max_city")
+        mv = s.get("max_pm10")
+        if c and mc and mv is not None:
+            bullets.append(f"• الغبار: {c} مدن متأثرة — أعلى قراءة: {mc} ({mv} µg/m³).")
+        elif c:
+            bullets.append(f"• الغبار: {c} مدن متأثرة داخل المملكة.")
 
-    return best_title or "لا يوجد"
+    # تفصيل GDACS
+    if gdacs_lines:
+        if _gdacs_mentions_saudi(gdacs_lines):
+            bullets.append("• GDACS: حدث يذكر المملكة — تأثير أعلى.")
+        else:
+            bullets.append("• GDACS: حدث إقليمي للتوعية — لا يوجد ذكر مباشر للمملكة (تأثير منخفض).")
+
+    # بحري/موانئ
+    if ukmto_lines:
+        bullets.append("• UKMTO: تحذيرات بحرية نشطة — تتطلب متابعة.")
+    if ais_lines:
+        bullets.append("• AIS: مؤشرات تشغيلية للموانئ/الحركة البحرية — تتطلب متابعة.")
+
+    if not bullets:
+        bullets.append("• لا توجد عوامل تشغيلية مؤثرة حالياً.")
+
+    return bullets
 
 
 # =====================================
@@ -130,7 +175,6 @@ def build_official_report(events, state, report_no):
     # =============================
     # تصنيف الأحداث + حساب المخاطر
     # =============================
-
     for e in events:
         section = e.get("section", "")
         title = e.get("title", "")
@@ -152,32 +196,31 @@ def build_official_report(events, state, report_no):
             dust_lines.append(f"- {title}")
             dust_events.append(e)
 
-    # ⭐ نقاط الغبار الذكية
     risk_score += _dust_risk_points(dust_events)
     risk_score = min(risk_score, 100)
 
     risk_icon, general_state = _risk_level(risk_score)
 
     # =============================
-    # أبرز حدث خلال آخر 6 ساعات (التحسين المطلوب)
+    # أبرز حدث خلال آخر 6 ساعات
     # =============================
-
     top_event = "لا يوجد"
-
     if gdacs_lines and _gdacs_mentions_saudi(gdacs_lines):
         top_event = gdacs_lines[0].replace("- ", "")
     elif dust_events:
         top_event = _top_dust_event(dust_events)
     elif gdacs_lines:
-        # إذا GDACS موجود لكن لا يذكر السعودية، نظهره فقط عند عدم وجود غبار
         top_event = gdacs_lines[0].replace("- ", "")
+
+    # =============================
+    # تفسير تشغيلي (الإضافة القوية)
+    # =============================
+    expl = _operational_explanation(risk_score, gdacs_lines, dust_events, ukmto_lines, ais_lines)
 
     # =============================
     # بناء النص
     # =============================
-
     lines = []
-
     lines.append("📄 تقرير الرصد والتحديث التشغيلي")
     lines.append(f"رقم التقرير: {report_no}")
     lines.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
@@ -199,6 +242,9 @@ def build_official_report(events, state, report_no):
     lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
     lines.append(top_event)
     lines.append("")
+    lines.append("🧾 تفسير تشغيلي:")
+    lines.extend(expl)
+    lines.append("")
     lines.append("📍 المناطق الأكثر تأثرًا:")
     lines.append("- الدول المجاورة" if gdacs_lines else "- داخل المملكة")
     lines.append("- مدن داخل المملكة" if dust_lines else "- لا يوجد")
@@ -206,36 +252,30 @@ def build_official_report(events, state, report_no):
     lines.append("════════════════════")
     lines.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
     lines.append("")
-
     if gdacs_lines or ukmto_lines or ais_lines:
         lines.append("• حدث إقليمي/تشغيلي قد يؤثر على تدفق سلاسل الإمداد.")
     else:
         lines.append("• لا توجد مؤشرات تشغيلية مؤثرة حالياً.")
-
     lines.append("")
     lines.append("════════════════════")
     lines.append("3️⃣ الكوارث الطبيعية (GDACS)")
     lines.append("")
     lines += gdacs_lines if gdacs_lines else ["- لا يوجد"]
-
     lines.append("")
     lines.append("════════════════════")
     lines.append("4️⃣ الأحداث والتحذيرات البحرية (UKMTO)")
     lines.append("")
     lines += ukmto_lines if ukmto_lines else ["- لا يوجد"]
-
     lines.append("")
     lines.append("════════════════════")
     lines.append("5️⃣ حركة السفن وازدحام الموانئ (AIS)")
     lines.append("")
     lines += ais_lines if ais_lines else ["- لا يوجد"]
-
     lines.append("")
     lines.append("════════════════════")
     lines.append("6️⃣ مؤشرات الغبار وجودة الهواء (PM10)")
     lines.append("")
     lines += dust_lines if dust_lines else ["- لا يوجد"]
-
     lines.append("")
     lines.append("════════════════════")
     lines.append("7️⃣ ملاحظات تشغيلية")
