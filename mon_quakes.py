@@ -7,9 +7,10 @@ from datetime import datetime, timedelta, timezone
 # =====================================
 
 MIN_MAG_SA = 3.0
+LOOKBACK_HOURS = 24
 
-# حدود السعودية (Bounding Box تقريبية)
-# يمكن تحسينها لاحقًا، لكنها ممتازة كبداية تشغيلية
+# حدود السعودية (تقريبية - لتقليل النتائج فقط)
+# ملاحظة: هذا وحده لا يكفي لأن بعض الأحداث في دول مجاورة قد تقع داخل صندوق الإحداثيات
 SA_BBOX = {
     "minlatitude": 16.0,
     "maxlatitude": 32.5,
@@ -17,8 +18,13 @@ SA_BBOX = {
     "maxlongitude": 56.0,
 }
 
-LOOKBACK_HOURS = 24  # نبحث في آخر 24 ساعة
-
+# كلمات تساعدنا نؤكد أن الحدث داخل السعودية من نص "place"
+SAUDI_KEYWORDS = [
+    "saudi arabia",
+    "saudi",
+    "ksa",
+    "kingdom of saudi arabia",
+]
 
 def _query_usgs():
     end_time = datetime.now(timezone.utc)
@@ -30,8 +36,8 @@ def _query_usgs():
         "starttime": start_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "endtime": end_time.strftime("%Y-%m-%dT%H:%M:%S"),
         "minmagnitude": MIN_MAG_SA,
-        **SA_BBOX,
         "orderby": "time",
+        **SA_BBOX,
     }
 
     try:
@@ -42,17 +48,24 @@ def _query_usgs():
     except Exception:
         return []
 
+def _is_saudi_place(place: str) -> bool:
+    if not place:
+        return False
+    p = place.lower()
+    return any(k in p for k in SAUDI_KEYWORDS)
 
 def fetch():
     """
     واجهة متوافقة مع main.py (لازم اسمها fetch)
     ترجع list من events بصيغة النظام
+    - داخل السعودية فقط
+    - Magnitude >= 3.0
     """
     events = []
     features = _query_usgs()
 
     for f in features:
-        props = f.get("properties", {})
+        props = f.get("properties", {}) or {}
         geom = f.get("geometry", {}) or {}
         coords = geom.get("coordinates", [])
 
@@ -60,21 +73,24 @@ def fetch():
             continue
 
         lon, lat = float(coords[0]), float(coords[1])
-        mag = props.get("mag")
-        place = props.get("place") or "داخل المملكة"
 
+        mag = props.get("mag")
         if mag is None:
             continue
-
         try:
             mag = float(mag)
         except Exception:
             continue
-
         if mag < MIN_MAG_SA:
             continue
 
-        # time بالميلي ثانية
+        place = props.get("place") or ""
+
+        # ✅ فلترة “داخل السعودية فقط” اعتمادًا على وصف المكان
+        # هذا يمنع حالات مثل: "Mohr, Iran" من الظهور كداخل السعودية
+        if not _is_saudi_place(place):
+            continue
+
         t_ms = props.get("time")
         if t_ms:
             t = datetime.fromtimestamp(t_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -82,8 +98,7 @@ def fetch():
             t = None
 
         events.append({
-            # نخليها ضمن الكوارث الطبيعية عشان تظهر في قسم GDACS عندك (3)
-            "section": "gdacs",
+            "section": "gdacs",  # يظهر في قسم الكوارث الطبيعية
             "title": f"🌍 زلزال داخل السعودية — قوة {mag:.1f} — {place}",
             "link": props.get("url"),
             "meta": {
