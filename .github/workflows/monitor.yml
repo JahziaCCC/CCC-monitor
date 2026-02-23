@@ -39,8 +39,10 @@ jobs:
 
       - name: Run CCC Monitor
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+  DEBUG_FIRMS: "1"
 
           # AIS (اختياري)
           AISHUB_USERNAME: ${{ secrets.AISHUB_USERNAME }}
