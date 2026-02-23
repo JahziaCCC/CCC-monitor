@@ -4,6 +4,7 @@ import json
 import hashlib
 import datetime
 import requests
+import re
 
 STATE_FILE = "mewa_state.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
@@ -64,29 +65,49 @@ def _lines_from_titles(items, limit=12):
             out.append(f"- {t.strip()}")
     return out if out else ["- لا يوجد"]
 
+# ✅ استخراج رقم قوي جداً (يدعم 3,255 و 3٬255 و 3 255 و 3255 و 2719)
+_NUM_RE = re.compile(r"(\d[\d\s,.\u00A0\u2009\u202F\u066B\u066C]*\d|\d)")
+
+def _parse_best_int(text: str):
+    """
+    يأخذ نص ويستخرج أكبر رقم صحيح منه حتى لو كان بصيغ مختلفة.
+    """
+    if not text:
+        return None
+    matches = _NUM_RE.findall(text)
+    nums = []
+    for m in matches:
+        # إزالة كل الفواصل والمسافات الخاصة
+        cleaned = (
+            m.replace(",", "")
+             .replace(".", "")
+             .replace("\u066C", "")  # Arabic thousands separator (٬)
+             .replace("\u066B", "")  # Arabic decimal separator (٫)
+             .replace("\u00A0", "")  # NBSP
+             .replace("\u2009", "")  # thin space
+             .replace("\u202F", "")  # narrow no-break space
+             .replace(" ", "")
+        )
+        if cleaned.isdigit():
+            try:
+                nums.append(int(cleaned))
+            except Exception:
+                pass
+    return max(nums) if nums else None
+
 def _extract_top_dust(dust_items):
-    # نتوقع عناوين مثل: "🌪️ مؤشر غبار مرتفع — الرياض: 3255 µg/m³"
-    # نطلع أعلى رقم موجود
-    best = None
+    """
+    يرجع أعلى قراءة غبار من عناوين مثل:
+    "🌪️ مؤشر غبار مرتفع — الرياض: 3,255 µg/m³"
+    """
+    best = None  # (value, title)
     for e in dust_items:
         t = e.get("title", "")
-        # استخراج رقم بشكل بسيط
-        nums = []
-        cur = ""
-        for ch in t:
-            if ch.isdigit():
-                cur += ch
-            else:
-                if cur:
-                    nums.append(int(cur))
-                    cur = ""
-        if cur:
-            nums.append(int(cur))
-        if nums:
-            v = max(nums)
+        v = _parse_best_int(t)
+        if v is not None:
             if best is None or v > best[0]:
                 best = (v, t)
-    return best  # (value, title)
+    return best
 
 def _risk_score(grouped):
     score = 0
@@ -116,10 +137,12 @@ def _risk_score(grouped):
 
     # Fires
     if grouped["fires"]:
-        # إذا عندك meta count نستخدمه، وإلا مجرد وجود أحداث يعطي وزن
         c = 0
         for e in grouped["fires"]:
-            c = max(c, int(e.get("count") or 0))
+            try:
+                c = max(c, int(e.get("count") or 0))
+            except Exception:
+                pass
         if c >= 100:
             score += 25
         elif c >= 20:
@@ -137,13 +160,11 @@ def _risk_score(grouped):
     if any((e.get("title") or "").strip() for e in grouped["ais"]):
         score += 10
 
-    # Food (مؤشر نصي بسيط)
+    # Food
     if any((e.get("title") or "").strip() for e in grouped["food"]):
         score += 8
 
-    if score > 100:
-        score = 100
-    return score
+    return min(score, 100)
 
 def _risk_level(score: int):
     if score >= 80:
@@ -155,7 +176,7 @@ def _risk_level(score: int):
     return "🟢 منخفض"
 
 def _pick_highlight(grouped):
-    # نفس منطقك: لو GDACS يذكر السعودية -> GDACS، وإلا أعلى غبار داخل المملكة
+    # لو GDACS يذكر السعودية -> GDACS، وإلا أعلى غبار داخل المملكة
     for e in grouped["gdacs"]:
         t = e.get("title") or ""
         if ("Saudi" in t) or ("السعودية" in t) or ("KSA" in t):
@@ -165,7 +186,6 @@ def _pick_highlight(grouped):
     if top:
         return top[1]
 
-    # fallback: أول حدث موجود
     for k in ["fires", "ukmto", "ais", "gdacs", "dust"]:
         if grouped[k]:
             return grouped[k][0].get("title") or "لا يوجد"
@@ -181,13 +201,12 @@ def build_report_text(title: str, events: list):
     level = _risk_level(score)
     highlight = _pick_highlight(grouped)
 
-    # Dust summary for تفسير تشغيلي
     top = _extract_top_dust(grouped["dust"])
     dust_count = len([e for e in grouped["dust"] if (e.get("title") or "").strip()])
-    top_line = ""
-    if top:
-        top_line = top[1]
-    gdacs_mentions_ksa = any(("Saudi" in (e.get("title") or "")) or ("السعودية" in (e.get("title") or "")) or ("KSA" in (e.get("title") or "")) for e in grouped["gdacs"])
+    gdacs_mentions_ksa = any(
+        ("Saudi" in (e.get("title") or "")) or ("السعودية" in (e.get("title") or "")) or ("KSA" in (e.get("title") or ""))
+        for e in grouped["gdacs"]
+    )
 
     txt = []
     txt.append(f"{title}")
@@ -197,26 +216,29 @@ def build_report_text(title: str, events: list):
     txt.append(f"نطاق الرصد: {scope}")
     txt.append(f"🕒 تاريخ ووقت التحديث: {now.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
     txt.append("⏱️ آلية التحديث: تلقائي\n")
+
     txt.append("════════════════════")
     txt.append("1️⃣ الملخص التنفيذي\n")
     txt.append(f"📊 مؤشر المخاطر الموحد: {score}/100")
     txt.append(f"📌 مستوى المخاطر: {level}\n")
+
     txt.append("📌 الحالة العامة: مراقبة")
     txt.append("📈 مقارنة بالفترة السابقة: — (لا توجد مقارنة سابقة)\n")
+
     txt.append("📍 أبرز حدث خلال آخر 6 ساعات:")
     txt.append(f"{highlight}\n")
 
-    # تفسير تشغيلي (اختياري – بنفس شكل تقاريرك الأخيرة)
     txt.append("🧾 تفسير تشغيلي:")
-    if top_line:
+    if top:
         txt.append("• العامل الرئيسي: الغبار داخل المملكة.")
-        txt.append(f"• الغبار: {dust_count} مدن متأثرة — أعلى قراءة: {top_line.split('—')[-1].strip() if '—' in top_line else top_line}")
+        txt.append(f"• الغبار: {dust_count} مدن متأثرة — أعلى قراءة: {top[1]}")
     else:
         txt.append("• العامل الرئيسي: لا توجد مؤشرات داخل المملكة حالياً.")
     if gdacs_mentions_ksa:
         txt.append("• GDACS: يوجد ذكر مباشر للمملكة (تأثير محتمل).")
     else:
         txt.append("• GDACS: حدث إقليمي للتوعية — لا يوجد ذكر مباشر للمملكة (تأثير منخفض).")
+
     txt.append("\n📍 المناطق الأكثر تأثرًا:")
     txt.append("- مدن داخل المملكة")
     txt.append("- الدول المجاورة\n")
@@ -224,21 +246,27 @@ def build_report_text(title: str, events: list):
     txt.append("════════════════════")
     txt.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي\n")
     txt.extend(_lines_from_titles(grouped["food"], limit=6))
+
     txt.append("\n════════════════════")
     txt.append("3️⃣ الكوارث الطبيعية (GDACS)\n")
     txt.extend(_lines_from_titles(grouped["gdacs"], limit=8))
+
     txt.append("\n════════════════════")
     txt.append("4️⃣ حرائق الغابات (FIRMS)\n")
     txt.extend(_lines_from_titles(grouped["fires"], limit=8))
+
     txt.append("\n════════════════════")
     txt.append("5️⃣ الأحداث والتحذيرات البحرية (UKMTO)\n")
     txt.extend(_lines_from_titles(grouped["ukmto"], limit=6))
+
     txt.append("\n════════════════════")
     txt.append("6️⃣ حركة السفن وازدحام الموانئ (AIS)\n")
     txt.extend(_lines_from_titles(grouped["ais"], limit=10))
+
     txt.append("\n════════════════════")
     txt.append("7️⃣ مؤشرات الغبار وجودة الهواء (PM10)\n")
     txt.extend(_lines_from_titles(grouped["dust"], limit=13))
+
     txt.append("\n════════════════════")
     txt.append("8️⃣ ملاحظات تشغيلية\n")
     txt.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
@@ -247,16 +275,12 @@ def build_report_text(title: str, events: list):
     return "\n".join(txt)
 
 def run(title: str, events: list, only_if_new: bool = False):
-    """
-    هذه هي الدالة المطلوبة (run) — main.py يستدعيها.
-    """
     text = build_report_text(title=title, events=events)
 
     if only_if_new:
         st = _load_state()
         h = _sha(text)
         if st.get("last_hash") == h:
-            # لا نرسل شيء إذا ما فيه تغيير
             return
         st["last_hash"] = h
         _save_state(st)
