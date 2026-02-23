@@ -1,238 +1,177 @@
 from datetime import datetime, timezone
 
-SECTION_ORDER = [
-    ("gdacs", "3️⃣ الكوارث الطبيعية (GDACS)"),
-    ("marine", "4️⃣ الأحداث والتحذيرات البحرية (UKMTO)"),
-    ("ports", "5️⃣ حركة السفن وازدحام الموانئ (AIS)"),
-    ("dust",  "6️⃣ مؤشرات الغبار وجودة الهواء (PM10)"),
-]
+# =====================================
+# أدوات مساعدة
+# =====================================
 
-# =========================
-# Helpers
-# =========================
+def _now_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-def _general_status_score(events):
-    score = 0
-    for e in events:
-        sec = e.get("section", "")
-        if sec == "marine":
-            score += 3
-        elif sec == "ports":
-            c = (e.get("meta") or {}).get("count", 0)
-            if c >= 30:
-                score += 2
-        elif sec == "gdacs":
-            score += 2
-        elif sec == "dust":
-            score += 1
 
-    if score >= 7:
-        return "نشاط مرتفع", score
-    if score >= 3:
-        return "نشاط متوسط", score
-    return "هادئة", score
+def _gdacs_weight(title: str):
+    """
+    وزن حدث GDACS حسب القرب من السعودية
+    """
 
-def _trend_arrow(score, state):
-    if "prev_score" not in state:
-        state["prev_score"] = score
-        return "— (لا توجد مقارنة سابقة)"
+    t = title.lower()
 
-    prev = int(state.get("prev_score", 0))
-    if score > prev:
-        tr = "↑ تصاعد"
-    elif score < prev:
-        tr = "↓ تراجع"
+    # داخل السعودية = وزن كامل
+    if "saudi" in t or "saudi arabia" in t:
+        return 1.0
+
+    # دول مجاورة = تأثير متوسط
+    neighbors = [
+        "iran", "iraq", "jordan",
+        "kuwait", "qatar", "oman",
+        "yemen", "uae", "turkiye",
+        "egypt"
+    ]
+
+    if any(n in t for n in neighbors):
+        return 0.6
+
+    # حدث إقليمي واسع
+    return 0.3
+
+
+def _risk_level(score):
+
+    if score >= 75:
+        return "🔴 حرج", "حرجة"
+    elif score >= 50:
+        return "🟠 مرتفع", "نشاط مرتفع"
+    elif score >= 25:
+        return "🟡 مراقبة", "مراقبة"
     else:
-        tr = "→ مستقر"
+        return "🟢 منخفض", "هادئة"
 
-    state["prev_score"] = score
-    return tr
 
-def _top_event(events):
-    for sec in ("marine", "ports", "gdacs", "dust"):
-        for e in events:
-            if e.get("section") != sec:
-                continue
-            if sec == "ports":
-                meta = e.get("meta") or {}
-                if meta.get("count", 0) <= 0:
-                    continue
-            return e.get("title", "")
-    return ""
-
-def _most_affected_areas(events):
-    areas = []
-    if any(e.get("section") == "marine" for e in events):
-        areas.append("البحر الأحمر/الخليج (ملاحة)")
-    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) > 0 for e in events):
-        areas.append("الموانئ")
-    if any(e.get("section") == "gdacs" for e in events):
-        areas.append("الدول المجاورة")
-    if any(e.get("section") == "dust" for e in events):
-        areas.append("مدن داخل المملكة")
-    return areas[:3]
-
-# =========================
-# Risk Score (B logic)
-# =========================
-
-def _risk_score(events):
-
-    score = 0
-
-    # ---- Dust logic (ذكي)
-    dust_events = [e for e in events if e.get("section") == "dust"]
-    dust_cities = set()
-    dust_levels = []
-
-    for e in dust_events:
-        meta = e.get("meta") or {}
-        city = meta.get("city")
-        if city:
-            dust_cities.add(city)
-
-        pm = meta.get("max_pm10", meta.get("pm10", 0))
-        try:
-            pm = float(pm)
-        except:
-            pm = 0
-        dust_levels.append(pm)
-
-    dust_city_count = len(dust_cities)
-    dust_max = max(dust_levels) if dust_levels else 0
-
-    if dust_events:
-        if dust_city_count >= 3:
-            score += 40 if dust_max >= 500 else 30
-        else:
-            score += 22 if dust_max >= 500 else 16
-
-    # ---- GDACS
-    for e in events:
-        if e.get("section") == "gdacs":
-            title = e.get("title", "")
-            score += 40 if "RED" in title else 20
-
-    # ---- Marine
-    if any(e.get("section") == "marine" for e in events):
-        score += 20
-
-    # ---- Ports
-    for e in events:
-        if e.get("section") != "ports":
-            continue
-        c = int((e.get("meta") or {}).get("count", 0))
-        if c >= 30:
-            score += 20
-        elif c >= 15:
-            score += 10
-
-    return min(int(score), 100)
-
-def _risk_label(score):
-    if score >= 76:
-        return "🔴 حرج"
-    if score >= 51:
-        return "🟠 مرتفع"
-    if score >= 21:
-        return "🟡 مراقبة"
-    return "🟢 هادئ"
-
-def _status_from_risk(risk):
-    if risk >= 76:
-        return "حرجة"
-    if risk >= 51:
-        return "نشاط مرتفع"
-    if risk >= 21:
-        return "مراقبة"
-    return "هادئة"
-
-# =========================
-# Report Builder
-# =========================
+# =====================================
+# بناء التقرير الرسمي
+# =====================================
 
 def build_official_report(events, state, report_no):
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    risk_score = 0
 
-    _, base_score = _general_status_score(events)
-    trend = _trend_arrow(base_score, state)
+    gdacs_lines = []
+    ukmto_lines = []
+    ais_lines = []
+    dust_lines = []
 
-    risk = _risk_score(events)
-    risk_lbl = _risk_label(risk)
-    status = _status_from_risk(risk)
+    # =============================
+    # تصنيف الأحداث
+    # =============================
 
-    top = _top_event(events)
-    areas = _most_affected_areas(events)
+    for e in events:
+
+        section = e.get("section", "")
+        title = e.get("title", "")
+
+        if section == "gdacs":
+            gdacs_lines.append(f"- {title}")
+
+            # ⭐ حساب ذكي للمخاطر
+            w = _gdacs_weight(title)
+            risk_score += int(30 * w)
+
+        elif section == "ukmto":
+            ukmto_lines.append(f"- {title}")
+            risk_score += 20
+
+        elif section == "ais":
+            ais_lines.append(f"- {title}")
+            risk_score += 15
+
+        elif section == "dust":
+            dust_lines.append(f"- {title}")
+            risk_score += 10
+
+    # سقف المخاطر
+    if risk_score > 100:
+        risk_score = 100
+
+    risk_icon, general_state = _risk_level(risk_score)
+
+    # =============================
+    # الملخص التنفيذي
+    # =============================
+
+    top_event = "لا يوجد"
+    if gdacs_lines:
+        top_event = gdacs_lines[0].replace("- ", "")
+    elif dust_lines:
+        top_event = dust_lines[0].replace("- ", "")
+
+    # =============================
+    # بناء النص
+    # =============================
 
     lines = []
+
     lines.append("📄 تقرير الرصد والتحديث التشغيلي")
     lines.append(f"رقم التقرير: {report_no}")
     lines.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
     lines.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
     lines.append("")
     lines.append("نطاق الرصد: المملكة والدول المجاورة")
-    lines.append(f"🕒 تاريخ ووقت التحديث: {now}")
+    lines.append(f"🕒 تاريخ ووقت التحديث: {_now_utc()}")
     lines.append("⏱️ آلية التحديث: تلقائي")
     lines.append("")
     lines.append("════════════════════")
     lines.append("1️⃣ الملخص التنفيذي")
     lines.append("")
-    lines.append(f"📊 مؤشر المخاطر الموحد: {risk}/100")
-    lines.append(f"📌 مستوى المخاطر: {risk_lbl}")
+    lines.append(f"📊 مؤشر المخاطر الموحد: {risk_score}/100")
+    lines.append(f"📌 مستوى المخاطر: {risk_icon}")
     lines.append("")
-    lines.append(f"📌 الحالة العامة: {status}")
-    lines.append(f"📈 مقارنة بالفترة السابقة: {trend}")
+    lines.append(f"📌 الحالة العامة: {general_state}")
+    lines.append("📈 مقارنة بالفترة السابقة: — (لا توجد مقارنة سابقة)")
     lines.append("")
     lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
-    lines.append(top if top else "لا توجد أحداث مؤثرة ضمن نطاق الرصد.")
+    lines.append(top_event)
     lines.append("")
     lines.append("📍 المناطق الأكثر تأثرًا:")
-    if areas:
-        for a in areas:
-            lines.append(f"- {a}")
-    else:
-        lines.append("- لا يوجد")
+    lines.append("- الدول المجاورة")
+    lines.append("- مدن داخل المملكة")
     lines.append("")
-
-    # ===== سلاسل الإمداد (بدون الغبار)
     lines.append("════════════════════")
     lines.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
     lines.append("")
-    bullets = []
 
-    if any(e.get("section") == "marine" for e in events):
-        bullets.append("• تحذير/حادث بحري قد يؤثر على حركة الشحن.")
-
-    if any(e.get("section") == "ports" and (e.get("meta") or {}).get("count", 0) >= 30 for e in events):
-        bullets.append("• ازدحام مرتفع في أحد الموانئ.")
-
-    if any(e.get("section") == "gdacs" for e in events):
-        bullets.append("• حدث إقليمي قد يؤثر على تدفق سلاسل الإمداد.")
-
-    if bullets:
-        lines.extend(bullets)
+    if gdacs_lines:
+        lines.append("• حدث إقليمي قد يؤثر على تدفق سلاسل الإمداد.")
     else:
         lines.append("• لا توجد مؤشرات تشغيلية مؤثرة حالياً.")
+
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("3️⃣ الكوارث الطبيعية (GDACS)")
     lines.append("")
 
-    grouped = {}
-    for e in events:
-        grouped.setdefault(e.get("section", "other"), []).append(e)
+    lines += gdacs_lines if gdacs_lines else ["- لا يوجد"]
 
-    for sec, title in SECTION_ORDER:
-        lines.append("════════════════════")
-        lines.append(title)
-        lines.append("")
-        items = grouped.get(sec, [])
-        if not items:
-            lines.append("- لا يوجد")
-            lines.append("")
-            continue
-        for it in items[:6]:
-            lines.append(f"- {it.get('title','')}")
-        lines.append("")
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("4️⃣ الأحداث والتحذيرات البحرية (UKMTO)")
+    lines.append("")
 
+    lines += ukmto_lines if ukmto_lines else ["- لا يوجد"]
+
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("5️⃣ حركة السفن وازدحام الموانئ (AIS)")
+    lines.append("")
+
+    lines += ais_lines if ais_lines else ["- لا يوجد"]
+
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("6️⃣ مؤشرات الغبار وجودة الهواء (PM10)")
+    lines.append("")
+
+    lines += dust_lines if dust_lines else ["- لا يوجد"]
+
+    lines.append("")
     lines.append("════════════════════")
     lines.append("7️⃣ ملاحظات تشغيلية")
     lines.append("")
