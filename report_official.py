@@ -4,6 +4,7 @@ import json
 import hashlib
 import datetime
 import requests
+import re
 
 STATE_FILE = "mewa_state.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
@@ -34,7 +35,7 @@ def _sha(text: str) -> str:
 
 
 def _tg_send(text: str):
-    # إذا ما فيه توكن/شات آي دي لا يفشل التشغيل
+    # لا تفشل التشغيل لو تيليجرام غير مفعّل
     if not BOT or not CHAT_ID:
         print("ℹ️ Telegram غير مفعّل (لا يوجد TELEGRAM_BOT_TOKEN أو TELEGRAM_CHAT_ID).")
         return
@@ -42,22 +43,13 @@ def _tg_send(text: str):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
     r = requests.post(
         url,
-        json={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True
-        },
-        timeout=30
+        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+        timeout=30,
     )
     r.raise_for_status()
 
 
 def _group_events(events):
-    """
-    يجمع الأحداث حسب section.
-    كل event لازم يكون dict مثل:
-    {"section": "fires", "title": "...", ...}
-    """
     grouped = {
         "dust": [],
         "food": [],
@@ -65,9 +57,8 @@ def _group_events(events):
         "fires": [],
         "ukmto": [],
         "ais": [],
-        "other": []
+        "other": [],
     }
-
     for e in (events or []):
         if not isinstance(e, dict):
             continue
@@ -75,41 +66,106 @@ def _group_events(events):
         if sec not in grouped:
             sec = "other"
         grouped[sec].append(e)
-
     return grouped
 
 
-def _lines_from_titles(items, limit=12):
+def _arabize_gdacs_title(title: str) -> str:
+    """
+    يحوّل سطور GDACS إلى عربي قدر الإمكان بدون ما يعتمد على ترجمة خارجية.
+    مثال:
+    Green earthquake (Magnitude 5.5M, Depth:10km) in Indonesia 24/02/2026 07:46 UTC, Few people affected ...
+    =>
+    🟢 منخفض زلزال (قوة 5.5M، عمق 10km) في Indonesia بتاريخ 24/02/2026 07:46 UTC، تأثر محدود ...
+    """
+    t = (title or "").strip()
+    if not t:
+        return t
+
+    # إزالة تكرار Green/Orange/Red من بداية النص إذا كان موجود
+    # ونحوله لأيقونة عربية
+    level_map = {
+        "green": "🟢 منخفض",
+        "orange": "🟠 مرتفع",
+        "red": "🔴 حرج",
+        "yellow": "🟡 مراقبة",
+    }
+
+    # التقط مستوى اللون إن وجد
+    m = re.match(r"^(GDACS\s+)?(Green|Orange|Red|Yellow)\b\s*[-—:]*\s*", t, flags=re.I)
+    prefix = ""
+    if m:
+        color = m.group(2).lower()
+        prefix = level_map.get(color, "")
+        t = t[m.end():].strip()
+
+    # مصطلحات أساسية
+    # earthquake / flood / drought / wildfire / forest fire notification
+    t = re.sub(r"\bearthquake\b", "زلزال", t, flags=re.I)
+    t = re.sub(r"\bflood alert\b", "تنبيه فيضانات", t, flags=re.I)
+    t = re.sub(r"\bdrought\b", "جفاف", t, flags=re.I)
+    t = re.sub(r"\bforest fire notification\b", "تنبيه حرائق غابات", t, flags=re.I)
+    t = re.sub(r"\bwildfire\b", "حرائق غابات", t, flags=re.I)
+
+    # Magnitude / Depth
+    t = re.sub(r"\bMagnitude\b", "قوة", t, flags=re.I)
+    t = re.sub(r"\bDepth\b", "عمق", t, flags=re.I)
+
+    # in <Country>
+    t = re.sub(r"\bin\s+", "في ", t, flags=re.I)
+
+    # Few people affected / No people affected / unknown
+    t = re.sub(r"\bFew people affected\b", "تأثر محدود", t, flags=re.I)
+    t = re.sub(r"\bNo people affected\b", "لا يوجد تأثير على السكان", t, flags=re.I)
+    t = re.sub(r"\[unknown\]", "غير معروف", t, flags=re.I)
+
+    # تنظيف HTML entities إن ظهرت
+    t = t.replace("&gt;", ">").replace("&amp;", "&")
+
+    # تنسيق عربي بسيط للفواصل
+    t = t.replace(",", "،")
+
+    # لو ما كان عنده prefix (لون) نخليه بدون
+    if prefix:
+        # إذا السطر أصلاً يبدأ بأيقونة 🌍 نحتفظ بها ونضيف بعدها
+        if t.startswith("🌍"):
+            return f"🌍 {prefix} {t[1:].strip()}"
+        return f"🌍 {prefix} {t}"
+    else:
+        # إذا ما جانا لون، نخلي 🌍 فقط
+        if t.startswith("🌍"):
+            return t
+        return f"🌍 {t}"
+
+
+def _lines_from_titles(items, limit=12, section=None):
     out = []
     for e in (items or [])[:limit]:
         t = (e.get("title") or "").strip()
-        if t:
-            # تأكد أنه سطر نصي فقط
-            out.append(f"- {t}")
+        if not t:
+            continue
+        if section == "gdacs":
+            t = _arabize_gdacs_title(t)
+        out.append(f"- {t}")
     return out if out else ["- لا يوجد"]
 
 
 def _pick_top_event(grouped):
-    """
-    يرجع أفضل حدث للعرض في الملخص التنفيذي.
-    الأولوية: fires ثم gdacs ثم ukmto ثم ais ثم food ثم dust
-    """
     priority = ["fires", "gdacs", "ukmto", "ais", "food", "dust", "other"]
     for k in priority:
         if grouped.get(k):
             t = (grouped[k][0].get("title") or "").strip()
             if t:
+                if k == "gdacs":
+                    return _arabize_gdacs_title(t)
                 return t
     return "لا يوجد"
 
 
 def _build_report_text(report_title, grouped, include_ais=True):
     now = _now_ksa().strftime("%Y-%m-%d %H:%M KSA")
-
     top_event = _pick_top_event(grouped)
 
-    # مؤشر مبسط (تقدر تعدله لاحقاً)
-    # إذا فيه fires أو gdacs نخليها مراقبة/مرتفع، غير ذلك منخفض
+    # مؤشر مبسّط (حسب وجود أقسام)
     risk_score = 0
     if grouped.get("fires"):
         risk_score = max(risk_score, 55)
@@ -150,24 +206,25 @@ def _build_report_text(report_title, grouped, include_ais=True):
     text.append("")
     text.append("════════════════════")
     text.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
-    text.extend(_lines_from_titles(grouped.get("food")))
+    text.extend(_lines_from_titles(grouped.get("food"), section="food"))
     text.append("")
     text.append("════════════════════")
     text.append("3️⃣ الكوارث الطبيعية")
-    text.extend(_lines_from_titles(grouped.get("gdacs")))
+    # نخليها 10 مثل ما عندك، تقدر تخفضها لـ5 لو تبي
+    text.extend(_lines_from_titles(grouped.get("gdacs"), limit=10, section="gdacs"))
     text.append("")
     text.append("════════════════════")
     text.append("4️⃣ حرائق الغابات")
-    text.extend(_lines_from_titles(grouped.get("fires"), limit=30))
+    text.extend(_lines_from_titles(grouped.get("fires"), limit=30, section="fires"))
     text.append("")
     text.append("════════════════════")
     text.append("5️⃣ الأحداث والتحذيرات البحرية")
-    text.extend(_lines_from_titles(grouped.get("ukmto")))
+    text.extend(_lines_from_titles(grouped.get("ukmto"), section="ukmto"))
     text.append("")
     text.append("════════════════════")
     text.append("6️⃣ حركة السفن وازدحام الموانئ")
     if include_ais:
-        text.extend(_lines_from_titles(grouped.get("ais")))
+        text.extend(_lines_from_titles(grouped.get("ais"), section="ais"))
     else:
         text.append("- لا يوجد")
     text.append("")
@@ -187,14 +244,8 @@ def run(
     events=None,
 ):
     """
-    Compatible with main.py:
-    report_official.run(
-        report_title=...,
-        report_id=...,
-        only_if_new=...,
-        include_ais=...,
-        events=...
-    )
+    متوافق مع main.py عندك:
+    report_official.run(report_title=..., report_id=..., only_if_new=..., include_ais=..., events=...)
     """
     if events is None:
         events = []
@@ -202,7 +253,6 @@ def run(
     grouped = _group_events(events)
     report_text = _build_report_text(report_title, grouped, include_ais=include_ais)
 
-    # طباعة للتأكد داخل Actions
     print(report_text)
 
     # منع الإرسال إذا ما فيه تغيير (اختياري)
@@ -216,7 +266,7 @@ def run(
         state[report_id] = new_hash
         _save_state(state)
 
-    # إرسال تيليجرام بدون ما يكسر التشغيل لو فشل
+    # إرسال تيليجرام بدون ما يكسر التشغيل
     try:
         _tg_send(report_text)
     except Exception as e:
