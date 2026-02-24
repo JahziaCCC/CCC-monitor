@@ -56,51 +56,62 @@ def _request_pm10(lat, lon):
     raise last_err
 
 def fetch():
-    dust_events = []
-    failed = 0
+    pm10_lines = []   # ✅ كل المدن (حتى لو طبيعي)
+    dust_events = []  # ✅ فقط لاحتساب المخاطر/أبرز حدث
+    failed_names = []
     ok = 0
 
     for name, lat, lon in CITIES:
         try:
             val = _request_pm10(lat, lon)
             if val is None:
-                failed += 1
+                failed_names.append(name)
+                pm10_lines.append(f"- {name}: غير متاح مؤقتاً")
             else:
                 ok += 1
                 v = int(round(val))
 
+                # سطر عرض PM10 لكل المدن
                 if v >= PM10_VERY_HIGH:
-                    title = f"⚠️ غبار شديد جدًا — {name}: {v} µg/m³"
+                    pm10_lines.append(f"- ⚠️ غبار شديد جدًا — {name}: {v} µg/m³")
                 elif v >= PM10_HIGH:
-                    title = f"🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³"
+                    pm10_lines.append(f"- 🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³")
                 else:
-                    title = f"✅ غبار ضمن الطبيعي — {name}: {v} µg/m³"
+                    pm10_lines.append(f"- ✅ غبار ضمن الطبيعي — {name}: {v} µg/m³")
 
-                dust_events.append({
-                    "section": "dust",
-                    "title": title,
-                    "value": v
-                })
+                # أحداث “الغبار” فقط إذا مرتفع/شديد (للمخاطر/الملخص)
+                if v >= PM10_HIGH:
+                    title = f"🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³"
+                    if v >= PM10_VERY_HIGH:
+                        title = f"⚠️ غبار شديد جدًا — {name}: {v} µg/m³"
+                    dust_events.append({
+                        "section": "dust",
+                        "title": title,
+                        "value": v
+                    })
 
         except Exception:
-            failed += 1
+            failed_names.append(name)
+            pm10_lines.append(f"- {name}: غير متاح مؤقتاً")
 
         time.sleep(SLEEP_BETWEEN)
 
+    # ترتيب أحداث الغبار تنازليًا
     dust_events.sort(key=lambda x: int(x.get("value", 0)), reverse=True)
 
-    # ✅ مهم: لا نرجع "ملاحظة" ضمن قسم dust حتى لا تصبح أبرز حدث
     events = dust_events[:]
 
-    if failed:
-        events.append({
-            "section": "ops_note",   # <-- ليست dust
-            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {failed} مواقع (مؤقتاً).",
-            "value": -1
-        })
+    # ✅ أرسل قائمة PM10 كاملة تحت قسم مستقل
+    events.append({
+        "section": "pm10_list",
+        "pm10_lines": pm10_lines
+    })
 
-    # لو ما نجح ولا موقع: نرجع فقط الملاحظة (ops_note) بدون dust
-    if ok == 0:
-        return [e for e in events if e["section"] == "ops_note"]
+    # ✅ أرسل ملاحظة تشغيلية (لن تكون “أبرز حدث”)
+    if failed_names:
+        events.append({
+            "section": "ops_note",
+            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {len(failed_names)} مواقع (مؤقتاً)."
+        })
 
     return events
