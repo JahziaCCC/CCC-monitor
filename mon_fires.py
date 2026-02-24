@@ -8,13 +8,16 @@ import requests
 # ===== FIRMS API =====
 FIRMS_AREA_CSV = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}"
 
-# BBOX لجلب البيانات، الفلترة الحقيقية تتم بالـ Polygon + Guards
+# BBOX لجلب البيانات (واسع)، الفلترة الحقيقية تتم بالـ Polygon + Guards
 KSA_BBOX = os.environ.get("FIRMS_KSA_BBOX", "34.4,16.0,55.7,32.2")
 FIRMS_SOURCE = os.environ.get("FIRMS_SOURCE", "VIIRS_SNPP_NRT")
 FIRMS_DAYS = int(os.environ.get("FIRMS_DAYS", "1"))  # 1 = آخر 24 ساعة
 
 TOP_N = int(os.environ.get("FIRMS_TOP_N", "5"))
-MIN_FRP = float(os.environ.get("ALERT_FIRES_FRP", "0"))
+
+# ✅ افتراضي احترافي لتقليل "Gas flares" الصناعية (خصوصاً الشرقية)
+# تقدر تغيّره من GitHub Variables: ALERT_FIRES_FRP
+MIN_FRP = float(os.environ.get("ALERT_FIRES_FRP", "30"))
 
 # وضع جغرافي:
 # IN_KSA = داخل السعودية فقط (افتراضي)
@@ -51,8 +54,8 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     p2 = math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat/2)**2) + math.cos(p1)*math.cos(p2)*(math.sin(dlon/2)**2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    a = (math.sin(dlat / 2) ** 2) + math.cos(p1) * math.cos(p2) * (math.sin(dlon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
 def _nearest_place(lat, lon):
@@ -90,7 +93,7 @@ def _parse_firms_csv(text):
             continue
     return rows
 
-# ===== Saudi Arabia Polygon (مبسط) =====
+# ===== Saudi Polygon (مبسط) =====
 # (lon, lat)
 KSA_POLYGON = [
     (34.5, 16.0),
@@ -142,7 +145,7 @@ def _in_ksa_polygon(lat, lon) -> bool:
     داخل السعودية فعلياً:
     1) فلتر سريع bbox
     2) polygon
-    3) Guards لاستبعاد العراق/إيران/الكويت شمال شرق
+    3) Guards لاستبعاد العراق/إيران/الكويت شمال شرق (سبب التسرب سابقاً)
     """
     # 1) فلتر عام سريع
     if not (16.0 <= lat <= 32.5 and 34.0 <= lon <= 56.0):
@@ -153,13 +156,11 @@ def _in_ksa_polygon(lat, lon) -> bool:
         return False
 
     # 3) Guards (مهم جداً)
-    # أي نقطة شمال المملكة (lat>=29.2) لا يمكن أن تكون شرقية جداً (lon>44.5) داخل السعودية.
-    # هذا يحذف نقاط مثل: 31.03,47.28 و 30.72,49.82
+    # يحذف نقاط مثل: 31.03,47.28 و 30.72,49.82
     if lat >= 29.2 and lon > 44.5:
         return False
 
-    # استبعاد “زاوية الكويت/البصرة” تقريبياً
-    # (يساعد ضد نقاط قريبة من 29N و 47-49E)
+    # استبعاد زاوية الكويت/البصرة تقريبياً
     if lat >= 28.8 and lon > 47.2:
         return False
 
@@ -191,7 +192,7 @@ def fetch():
 
     rows = _parse_firms_csv(r.text)
 
-    # فلتر FRP (اختياري)
+    # فلتر FRP لتقليل الضوضاء الصناعية
     if MIN_FRP > 0:
         rows = [x for x in rows if x["frp"] >= MIN_FRP]
 
@@ -218,7 +219,7 @@ def fetch():
         return [{"section": "fires", "title": "- لا يوجد", "meta": {"count": 0}}]
 
     count = len(rows)
-    max_frp = max(x["frp"] for x in rows) if rows else 0.0
+    max_frp = max(x["frp"] for x in rows)
     top = sorted(rows, key=lambda x: x["frp"], reverse=True)[:TOP_N]
 
     scope_text = "داخل السعودية" if GEO_MODE == "IN_KSA" else f"داخل/حول السعودية (≤ {AROUND_KM:.0f} كم)"
@@ -228,7 +229,7 @@ def fetch():
     events.append({
         "section": "fires",
         "title": f"🔥 حرائق نشطة {scope_text} — {count} رصد خلال آخر {hours_text} ساعة (أعلى FRP: {max_frp:.1f})",
-        "meta": {"count": count, "max_frp": max_frp, "scope": scope_text, "bbox": KSA_BBOX, "source": FIRMS_SOURCE}
+        "meta": {"count": count, "max_frp": max_frp, "scope": scope_text, "bbox": KSA_BBOX, "source": FIRMS_SOURCE, "min_frp": MIN_FRP}
     })
 
     for i, p in enumerate(top, start=1):
