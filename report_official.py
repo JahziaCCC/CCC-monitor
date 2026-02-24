@@ -1,8 +1,7 @@
-def run(events=None):
-    """
-    CCC Official Report Builder
-    النسخة المستقرة النهائية
-    """
+def run(report_title="📄 تقرير الرصد والتحديث التشغيلي",
+        only_if_new=False,
+        include_ais=True,
+        events=None):
 
     now = _now_ksa()
     report_id = now.strftime("RPT-%Y%m%d-%H%M%S")
@@ -10,44 +9,29 @@ def run(events=None):
     events = events or []
     grouped = _group_events(events)
 
-    # =========================
-    # Sections
-    # =========================
-    food_lines  = _lines_from_titles(grouped.get("food", []))
+    food_lines = _lines_from_titles(grouped.get("food", []))
     gdacs_lines = _lines_from_titles(grouped.get("gdacs", []))
     fires_lines = _lines_from_titles(grouped.get("fires", []))
     ukmto_lines = _lines_from_titles(grouped.get("ukmto", []))
-    ais_lines   = _lines_from_titles(grouped.get("ais", []))
+    ais_lines = _lines_from_titles(grouped.get("ais", [])) if include_ais else ["- لا يوجد"]
 
-    # =========================
-    # Executive logic
-    # =========================
     top_event = "لا يوجد"
-
     if grouped.get("fires"):
         top_event = grouped["fires"][0].get("title", "لا يوجد")
     elif grouped.get("gdacs"):
         top_event = grouped["gdacs"][0].get("title", "لا يوجد")
 
-    # =========================
-    # Risk Score (بسيط ومستقر)
-    # =========================
     score = 0
-
     if grouped.get("fires"):
         score += 40
-
     if grouped.get("gdacs"):
         score += 15
-
     if grouped.get("ukmto"):
         score += 10
-
     if grouped.get("ais"):
         score += 10
 
-    if score > 100:
-        score = 100
+    score = max(0, min(100, score))
 
     if score >= 80:
         level = "🔴 حرج"
@@ -58,17 +42,10 @@ def run(events=None):
     else:
         level = "🟢 منخفض"
 
-    # =========================
-    # Report text
-    # =========================
     text = f"""📄 تقرير الرصد والتحديث التشغيلي
 رقم التقرير: {report_id}
-الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة
-تصنيف التقرير: تشغيلي – للاستخدام الداخلي
 
-نطاق الرصد: المملكة والدول المجاورة
 🕒 تاريخ ووقت التحديث: {now.strftime('%Y-%m-%d %H:%M KSA')}
-⏱️ آلية التحديث: تلقائي
 
 ════════════════════
 1️⃣ الملخص التنفيذي
@@ -101,13 +78,8 @@ def run(events=None):
 
 ════════════════════
 7️⃣ ملاحظات تشغيلية
-• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.
-• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.
+• تم إعداد التقرير آليًا.
 """
 
-    # =========================
-    # Telegram Send
-    # =========================
     _tg_send(text)
-
     return text
