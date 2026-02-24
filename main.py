@@ -1,91 +1,71 @@
 # main.py
 import os
-import datetime
 
 import report_official
+import mon_fires
+import mon_gdacs
+import mon_ais  # إذا اسمك mon_ais_ports.py غيّرها هنا أو أعد تسمية الملف
+import mon_dusty
 
-def _safe_import(name: str):
+# إذا عندك UKMTO:
+try:
+    import mon_ukmto
+    HAS_UKMTO = True
+except Exception:
+    HAS_UKMTO = False
+
+
+def _safe_call(fn, section_name: str):
+    """
+    يمنع توقف الـ run: أي خطأ من المصدر يرجع حدث واحد فيه رسالة توضيحية.
+    """
     try:
-        return __import__(name)
+        return fn() or []
     except Exception as e:
-        print(f"[WARN] cannot import {name}: {e}")
-        return None
+        return [{
+            "section": "other",
+            "title": f"ℹ️ ملاحظة: تعذر جلب بيانات {section_name} مؤقتاً. ({type(e).__name__})"
+        }]
 
 
-def collect_events(include_ais: bool = True):
+def collect_events_ccc():
     events = []
+    events += _safe_call(mon_fires.get_events, "FIRMS/الحرائق")
+    events += _safe_call(mon_gdacs.get_events, "GDACS/الكوارث الطبيعية")
+    events += _safe_call(mon_ais.get_events, "AIS/السفن والموانئ")
 
-    mon_gdacs = _safe_import("mon_gdacs")
-    if mon_gdacs and hasattr(mon_gdacs, "collect"):
-        try:
-            gd = mon_gdacs.collect()
-            print(f"[DEBUG] gdacs={len(gd)}")
-            events.extend(gd)
-        except Exception as e:
-            print(f"[WARN] mon_gdacs.collect failed: {e}")
+    if HAS_UKMTO:
+        events += _safe_call(mon_ukmto.get_events, "UKMTO/تحذيرات بحرية")
 
-    mon_fires = _safe_import("mon_fires")
-    if mon_fires and hasattr(mon_fires, "collect"):
-        try:
-            ff = mon_fires.collect()
-            print(f"[DEBUG] fires={len(ff)}")
-            events.extend(ff)
-        except Exception as e:
-            print(f"[WARN] mon_fires.collect failed: {e}")
-
-    mon_ukmto = _safe_import("mon_ukmto")
-    if mon_ukmto and hasattr(mon_ukmto, "collect"):
-        try:
-            uk = mon_ukmto.collect()
-            print(f"[DEBUG] ukmto={len(uk)}")
-            events.extend(uk)
-        except Exception as e:
-            print(f"[WARN] mon_ukmto.collect failed: {e}")
-
-    if include_ais:
-        mon_ais = _safe_import("mon_ais")
-        if mon_ais and hasattr(mon_ais, "collect"):
-            try:
-                aa = mon_ais.collect()
-                print(f"[DEBUG] ais={len(aa)}")
-                events.extend(aa)
-            except Exception as e:
-                print(f"[WARN] mon_ais.collect failed: {e}")
-
-    risk_food = _safe_import("risk_food")
-    if risk_food and hasattr(risk_food, "collect"):
-        try:
-            fd = risk_food.collect()
-            print(f"[DEBUG] food={len(fd)}")
-            events.extend(fd)
-        except Exception as e:
-            print(f"[WARN] risk_food.collect failed: {e}")
-
-    print(f"[DEBUG] total events={len(events)}")
-    if events:
-        print("[DEBUG] sample:", events[0])
-    else:
-        print("[DEBUG] events is EMPTY")
+    # Food (إذا عندك ملف risk_food.py مثلاً)
+    try:
+        import risk_food
+        events += _safe_call(risk_food.get_events, "سلاسل الإمداد الغذائي")
+    except Exception:
+        pass
 
     return events
 
 
-def run_report(report_title: str, only_if_new: bool = False, include_ais: bool = True):
-    events = collect_events(include_ais=include_ais)
-
-    # دعم الاستدعاء القديم/الجديد
-    return report_official.run(
+def run_ccc():
+    events = collect_events_ccc()
+    report_official.run(
         events=events,
-        report_title=report_title,
-        only_if_new=only_if_new,
-        include_ais=include_ais,
+        report_title="📄 تقرير الرصد والتحديث التشغيلي",
+        only_if_new=True,       # مهم: يمنع التكرار
+        include_ais=True
     )
 
 
-def main():
-    print("🚀 CCC Monitor Running...")
-    run_report("📄 تقرير الرصد والتحديث التشغيلي", only_if_new=False, include_ais=True)
+def run_dust():
+    # mon_dusty يرسل تقريره بنفسه عبر تيليجرام
+    mon_dusty.run(only_if_new=True)
 
 
 if __name__ == "__main__":
-    main()
+    # اختيار الوظيفة من ENV (GitHub Actions)
+    job = (os.environ.get("JOB") or "ccc").lower().strip()
+    if job == "dust":
+        run_dust()
+    else:
+        run_ccc()
