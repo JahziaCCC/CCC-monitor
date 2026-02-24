@@ -1,55 +1,39 @@
 # main.py
 import os
-import datetime
 
 import report_official
+import mon_gdacs
+import mon_fires
+import mon_ukmto
+import mon_ais
+import risk_food
 
-# استيراد المصادر (إذا ملف ناقص ما يكسر التشغيل)
-def _safe_import(name):
-    try:
-        return __import__(name)
-    except Exception:
-        return None
-
-mon_gdacs = _safe_import("mon_gdacs")
-mon_fires = _safe_import("mon_fires")
-mon_ukmto = _safe_import("mon_ukmto")
-mon_ais = _safe_import("mon_ais")  # <-- تأكد اسم الملف mon_ais.py
-
-KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
-
-def collect_events(include_ais=True):
+def collect_events(include_ais: bool = True):
     events = []
-
-    if mon_gdacs and hasattr(mon_gdacs, "fetch"):
-        events.extend(mon_gdacs.fetch())
-
-    if mon_fires and hasattr(mon_fires, "fetch"):
-        events.extend(mon_fires.fetch())
-
-    if mon_ukmto and hasattr(mon_ukmto, "fetch"):
-        events.extend(mon_ukmto.fetch())
-
-    if include_ais and mon_ais and hasattr(mon_ais, "fetch"):
+    events.extend(risk_food.fetch())
+    events.extend(mon_gdacs.fetch())
+    events.extend(mon_fires.fetch())
+    events.extend(mon_ukmto.fetch())
+    if include_ais:
         events.extend(mon_ais.fetch())
-
     return events
 
-
-def run_report(report_title, only_if_new=True, include_ais=True):
+def run_report(report_title: str, only_if_new: bool = False, include_ais: bool = True):
     events = collect_events(include_ais=include_ais)
     return report_official.run(
-        report_title=report_title,
+        report_title,
+        events=events,
         only_if_new=only_if_new,
-        include_ais=include_ais,
-        events=events
+        include_ais=include_ais
     )
 
-
 def main():
-    # CCC Monitor (التقرير الرئيسي)
-    run_report("📄 تقرير الرصد والتحديث التشغيلي", only_if_new=False, include_ais=True)
+    # defaults
+    report_title = os.environ.get("REPORT_TITLE", "📌 تقرير مجدول")
+    only_if_new = os.environ.get("ONLY_IF_NEW", "0") == "1"
+    include_ais = os.environ.get("INCLUDE_AIS", "1") == "1"
 
+    run_report(report_title, only_if_new=only_if_new, include_ais=include_ais)
 
 if __name__ == "__main__":
     main()
