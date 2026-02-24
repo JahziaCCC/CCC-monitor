@@ -5,6 +5,7 @@ import hashlib
 import datetime
 import requests
 import re
+from typing import Dict, List, Any, Optional, Tuple
 
 STATE_FILE = "mewa_state.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
@@ -12,21 +13,15 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ====== عناوين الأقسام (تقدر تعدلها هنا) ======
-SECTION_HEADERS = {
-    "food":  "2️⃣ مؤشرات سلاسل الإمداد الغذائي",
-    # ✅ التعديل المطلوب: عربي بالكامل
-    "gdacs": "3️⃣ الكوارث الطبيعية (جي داكس)",
-    "fires": "4️⃣ حرائق الغابات (FIRMS)",
-    "ukmto": "5️⃣ الأحداث والتحذيرات البحرية (UKMTO)",
-    "ais":   "6️⃣ حركة السفن وازدحام الموانئ (AIS)",
-}
-
-# عنوان التقرير
-REPORT_TITLE = "📄 تقرير الرصد والتحديث التشغيلي"
+# =========================
+# Helpers
+# =========================
 
 def _now_ksa():
     return datetime.datetime.now(tz=KSA_TZ)
+
+def _utcnow():
+    return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
 
 def _load_state():
     try:
@@ -45,15 +40,63 @@ def _sha(text: str) -> str:
 def _tg_send(text: str):
     if not BOT or not CHAT_ID:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True
-    }, timeout=30)
+    r = requests.post(
+        url,
+        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+        timeout=30
+    )
     r.raise_for_status()
 
+def _safe_int(x, default=None):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+def _safe_float(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def _km_from_text(title: str) -> Optional[int]:
+    # match "~581 كم" or "(~581 كم)" or "581 km"
+    m = re.search(r"~\s*(\d+)\s*(?:كم|km)", title, re.IGNORECASE)
+    if m:
+        return _safe_int(m.group(1))
+    m = re.search(r"(\d+)\s*(?:كم|km)", title, re.IGNORECASE)
+    if m:
+        return _safe_int(m.group(1))
+    return None
+
+def _has_ksa_hint(text: str) -> bool:
+    t = (text or "").lower()
+    hints = [
+        "saudi", "saudi arabia", "ksa", "kingdom",
+        "السعودية", "المملكة", "داخل السعودية", "داخل المملكة"
+    ]
+    return any(h in t for h in hints)
+
+def _lines_from_titles(items, limit=12):
+    out = []
+    for e in (items or [])[:limit]:
+        t = (e.get("title") or "").strip()
+        if t:
+            out.append(f"- {t}")
+    return out if out else ["- لا يوجد"]
+
 def _group_events(events):
+    """
+    Expected event format:
+    {
+      "section": "gdacs|fires|ukmto|ais|food|other",
+      "title": "...",
+      "severity": optional "red/orange/yellow/green" etc,
+      "meta": optional dict
+    }
+    """
     grouped = {
         "food": [],
         "gdacs": [],
@@ -69,157 +112,115 @@ def _group_events(events):
         grouped[sec].append(e)
     return grouped
 
-def _lines_from_titles(items, limit=12):
-    out = []
-    for e in items[:limit]:
-        t = (e.get("title") or "").strip()
-        if t:
-            # لا نضيف "- " هنا، لأن التقرير هو اللي يضيفها
-            out.append(t)
-    return out if out else ["لا يوجد"]
+# =========================
+# Risk model (simple / stable)
+# =========================
 
-def _extract_main_factor_text(grouped):
-    # عامل رئيسي بسيط (من الواقع عندك)
-    if grouped["fires"] and any("حرائق" in (x.get("title") or "") for x in grouped["fires"]):
-        return "مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (للاطلاع)."
-    if grouped["gdacs"] and any("GDACS" in (x.get("title") or "") or "جي داكس" in (x.get("title") or "") for x in grouped["gdacs"]):
-        return "حدث إقليمي للتوعية — لا يوجد ذكر مباشر للمملكة (تأثير منخفض)."
-    if grouped["ais"] and any("سفينة" in (x.get("title") or "") for x in grouped["ais"]):
-        return "مؤشرات ازدحام/حركة بحرية داخل نطاقات المراقبة."
-    return "لا توجد مؤشرات داخل المملكة حالياً."
-
-def _pick_highlight(grouped):
+def _risk_score(grouped: Dict[str, List[dict]]) -> Tuple[int, str, str]:
     """
-    أبرز حدث:
-    - إذا فيه Fires headline -> استخدمه
-    - وإلا إذا فيه GDACS -> استخدمه
-    - وإلا -> لا يوجد
-    """
-    # Fires headline (عادة أول سطر)
-    for e in grouped["fires"]:
-        t = (e.get("title") or "").strip()
-        if t.startswith("🔥"):
-            return t
-
-    # GDACS headline
-    for e in grouped["gdacs"]:
-        t = (e.get("title") or "").strip()
-        if t:
-            return t
-
-    return "لا يوجد"
-
-def _calc_risk_index(grouped):
-    """
-    مؤشر مبسط فقط (بدون تعقيد):
-    - Fires موجودة: 40
-    - GDACS موجود: 20
-    - AIS موجود: 10
-    ثم cap 100
+    Returns: (score 0-100, level_emoji_text, general_status_text)
     """
     score = 0
-    if any((e.get("title") or "").startswith("🔥") for e in grouped["fires"]):
-        score += 40
-    if any((e.get("title") or "") for e in grouped["gdacs"]):
-        score += 20
-    if any((e.get("title") or "") for e in grouped["ais"]):
+
+    # Fires: informational unless high FRP/count in titles
+    fires = grouped.get("fires") or []
+    if fires:
+        # first line usually contains count/frp
+        top_title = (fires[0].get("title") or "")
+        # try parse "— 173 رصد" and "(أعلى FRP: 69.4)"
+        cnt = None
+        m = re.search(r"(\d+)\s*(?:رصد|رُصد)", top_title)
+        if m:
+            cnt = _safe_int(m.group(1))
+        frp = None
+        m2 = re.search(r"FRP[:\s]*([0-9]+(?:\.[0-9]+)?)", top_title, re.IGNORECASE)
+        if m2:
+            frp = _safe_float(m2.group(1))
+
+        if cnt is not None and cnt >= 200:
+            score += 35
+        elif cnt is not None and cnt >= 100:
+            score += 25
+        elif cnt is not None and cnt >= 30:
+            score += 15
+        else:
+            score += 10
+
+        if frp is not None and frp >= 80:
+            score += 25
+        elif frp is not None and frp >= 60:
+            score += 15
+
+    # GDACS: higher if explicitly mentions KSA; else awareness
+    gdacs = grouped.get("gdacs") or []
+    if gdacs:
+        t = (gdacs[0].get("title") or "")
+        if _has_ksa_hint(t):
+            score += 35
+        else:
+            score += 12
+
+    # UKMTO / AIS: if any alerts
+    ukmto = grouped.get("ukmto") or []
+    if ukmto and _lines_from_titles(ukmto) != ["- لا يوجد"]:
+        score += 25
+
+    ais = grouped.get("ais") or []
+    if ais and _lines_from_titles(ais) != ["- لا يوجد"]:
         score += 10
 
-    # حد أدنى تشغيلي
-    if score == 0:
-        score = 25
+    # Food: any operational note increases moderate
+    food = grouped.get("food") or []
+    if food and _lines_from_titles(food) != ["- لا يوجد"]:
+        score += 10
 
-    score = max(0, min(100, score))
+    # Clamp
+    if score < 0:
+        score = 0
+    if score > 100:
+        score = 100
+
+    # Level mapping
     if score >= 80:
         level = "🔴 حرج"
+        status = "حرجة"
     elif score >= 60:
         level = "🟠 مرتفع"
+        status = "نشاط مرتفع"
     elif score >= 40:
         level = "🟡 مراقبة"
+        status = "مراقبة"
     else:
         level = "🟢 منخفض"
-    return score, level
+        status = "مراقبة"
 
-def build_report(events):
-    grouped = _group_events(events)
-    now_utc = datetime.datetime.utcnow().replace(microsecond=0)
-    rpt_id = f"RPT-{_now_ksa().strftime('%Y%m%d-%H%M%S')}"
+    return score, level, status
 
-    risk_score, risk_level = _calc_risk_index(grouped)
-    highlight = _pick_highlight(grouped)
-    main_factor = _extract_main_factor_text(grouped)
+# =========================
+# Executive "Top event" selection
+# =========================
 
-    lines = []
-    lines.append(REPORT_TITLE)
-    lines.append(f"رقم التقرير: {rpt_id}")
-    lines.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
-    lines.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
-    lines.append("")
-    lines.append("نطاق الرصد: المملكة والدول المجاورة")
-    lines.append(f"🕒 تاريخ ووقت التحديث: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
-    lines.append("⏱️ آلية التحديث: تلقائي")
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("1️⃣ الملخص التنفيذي")
-    lines.append("")
-    lines.append(f"📊 مؤشر المخاطر الموحد: {risk_score}/100")
-    lines.append(f"📌 مستوى المخاطر: {risk_level}")
-    lines.append("")
-    lines.append("📌 الحالة العامة: مراقبة")
-    lines.append("📈 مقارنة بالفترة السابقة: — (لا توجد مقارنة سابقة)")
-    lines.append("")
-    lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
-    lines.append(f"{highlight}")
-    lines.append("")
-    lines.append("🧾 تفسير تشغيلي:")
-    lines.append(f"• العامل الرئيسي: {main_factor}")
-    if grouped["gdacs"]:
-        lines.append("• جي داكس: حدث إقليمي للتوعية — لا يوجد ذكر مباشر للمملكة (تأثير منخفض).")
-    lines.append("")
-    lines.append("📍 المناطق الأكثر تأثرًا:")
-    lines.append("- مدن داخل المملكة")
-    lines.append("- الدول المجاورة")
-    lines.append("")
-
-    # ===== الأقسام =====
-    order = ["food", "gdacs", "fires", "ukmto", "ais"]
-    for sec in order:
-        hdr = SECTION_HEADERS.get(sec, sec)
-        lines.append("════════════════════")
-        lines.append(hdr)
-        lines.append("")
-        sec_lines = _lines_from_titles(grouped.get(sec, []), limit=12)
-        # هنا نضيف "- " مرة واحدة فقط
-        for s in sec_lines:
-            lines.append(f"- {s}")
-        lines.append("")
-
-    # ===== ملاحظات =====
-    lines.append("════════════════════")
-    lines.append("7️⃣ ملاحظات تشغيلية")
-    lines.append("")
-    lines.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
-    lines.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
-
-    return "\n".join(lines)
-
-def run(events, force_send=False):
+def _pick_top_event_text(grouped: Dict[str, List[dict]]) -> Tuple[str, List[str]]:
     """
-    events: قائمة أحداث بالشكل:
-      {"section": "fires|gdacs|ais|ukmto|food", "title": "...", "meta": {...}}
+    Rule (A):
+    - If GDACS mentions Saudi -> pick GDACS headline
+    - Else pick Fires headline if exists (inside KSA) (because dust removed)
+    - Else nothing
+    Also return operational explanation lines for the executive summary.
     """
-    report = build_report(events)
-    state = _load_state()
+    explain = []
 
-    h = _sha(report)
-    last = state.get("last_hash")
+    gdacs = grouped.get("gdacs") or []
+    if gdacs:
+        gd_t = (gdacs[0].get("title") or "").strip()
+        if gd_t and _has_ksa_hint(gd_t):
+            explain.append("• العامل الرئيسي: حدث GDACS يذكر المملكة بشكل مباشر (تأثير أعلى).")
+            return gd_t, explain
 
-    # منع تكرار نفس التقرير
-    if (not force_send) and last == h:
-        return report
-
-    _tg_send(report)
-    state["last_hash"] = h
-    state["last_sent_utc"] = datetime.datetime.utcnow().isoformat() + "Z"
-    _save_state(state)
-    return report
+    fires = grouped.get("fires") or []
+    if fires:
+        f_t = (fires[0].get("title") or "").strip()
+        if f_t:
+            explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (للاطلاع).")
+            if gdacs:
+                explain.append("• GDACS: حدث إقليمي للتوعية — لا يوجد ذكر مباشر للمملكة (تأثير
