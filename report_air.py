@@ -1,20 +1,20 @@
 # report_air.py
 import os
-import json
-import hashlib
 import datetime
 import requests
+import json
+import hashlib
 
-import mon_dust  # ✅ اسم ملفك الصحيح
+import mon_dust
 
-STATE_FILE = "air_state.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
-
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-def _now_ksa():
-    return datetime.datetime.now(tz=KSA_TZ)
+STATE_FILE = "air_state.json"
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 def _load_state():
     try:
@@ -27,78 +27,61 @@ def _save_state(state: dict):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
 def _tg_send(text: str):
     if not BOT or not CHAT_ID:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True}
 
-    # Retry بسيط لأنك واجهت Telegram timeout
     last_err = None
     for _ in range(3):
         try:
-            r = requests.post(url, json={
-                "chat_id": CHAT_ID,
-                "text": text,
-                "disable_web_page_preview": True
-            }, timeout=30)
+            r = requests.post(url, json=payload, timeout=45)
             r.raise_for_status()
             return
         except Exception as e:
             last_err = e
     raise last_err
 
-def build_air_text(events):
-    ts_utc = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
-    header = []
-    header.append("📄 تقرير جودة الهواء والغبار (PM10)")
-    header.append(f"🕒 {ts_utc.strftime('%Y-%m-%d %H:%M UTC')}")
-    header.append("⏱️ آلية التحديث: تلقائي")
-    header.append("════════════════════")
-    header.append("📍 مؤشرات الغبار وجودة الهواء (PM10)")
-    header.append("")
+def build_air_report(lines_pm10):
+    now_utc = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+    rid = f"AIR-{now_utc.strftime('%Y%m%d-%H%M%S')}"
 
     lines = []
-    for e in events:
-        if (e.get("section") or "").lower() == "dust":
-            t = (e.get("title") or "").strip()
-            if t:
-                lines.append(f"- {t}")
-
-    if not lines:
-        lines = ["- لا يوجد"]
-
-    # أضف أي ملاحظات تشغيلية (من section other)
-    notes = []
-    for e in events:
-        if (e.get("section") or "").lower() == "other":
-            t = (e.get("title") or "").strip()
-            if t and "ملاحظة" in t:
-                notes.append(f"• {t}")
-
-    out = "\n".join(header + lines)
-    if notes:
-        out += "\n\n════════════════════\n📝 ملاحظات تشغيلية\n" + "\n".join(notes)
-
-    return out
+    lines.append("🌫️ تقرير الغبار وجودة الهواء (PM10) — تقرير منفصل")
+    lines.append(f"رقم التقرير: {rid}")
+    lines.append(f"🕒 التحديث: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("📍 قراءات المدن")
+    lines.append("")
+    lines.extend(lines_pm10 if lines_pm10 else ["- لا يوجد"])
+    lines.append("")
+    lines.append("════════════════════")
+    lines.append("ملاحظات:")
+    lines.append("• يتم توليد هذا التقرير تلقائيًا.")
+    return rid, "\n".join(lines)
 
 def main():
+    only_if_new = os.environ.get("ONLY_IF_NEW_AIR", "1") == "1"
+
+    events = mon_dust.fetch()  # يفترض يرجع titles جاهزة
+    lines_pm10 = []
+    for e in events:
+        t = (e.get("title") or "").strip()
+        if t:
+            lines_pm10.append(t if t.startswith("-") else f"- {t}")
+
+    rid, text = build_air_report(lines_pm10)
+
     state = _load_state()
-
-    events = mon_dust.fetch(timeout=25)
-    text = build_air_text(events)
-
-    sig = _sha(text)
-    if state.get("last_sig") == sig:
-        # لا ترسل نفس الشي
+    h = _sha(text)
+    if only_if_new and state.get("last_hash") == h:
         return
 
     _tg_send(text)
-    state["last_sig"] = sig
-    state["last_sent_ksa"] = _now_ksa().isoformat()
+    state["last_hash"] = h
+    state["last_id"] = rid
     _save_state(state)
 
 if __name__ == "__main__":
