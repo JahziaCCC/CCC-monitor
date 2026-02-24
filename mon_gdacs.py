@@ -2,49 +2,54 @@
 import requests
 import xml.etree.ElementTree as ET
 
+# ترجمة اللون + تخزين severity
 COLOR_AR = {
     "Green": "🟢 منخفض",
+    "Yellow": "🟡 متوسط",
     "Orange": "🟠 مرتفع",
     "Red": "🔴 حرج",
-    "Yellow": "🟡 متوسط",
 }
 
-def _clean_title(title):
+def _detect_event_type(text: str) -> str:
+    t = (text or "").lower()
+    if "earthquake" in t:
+        return "earthquake"
+    if "flood" in t:
+        return "flood"
+    if "drought" in t:
+        return "drought"
+    if "cyclone" in t or "storm" in t:
+        return "cyclone"
+    if "volcano" in t or "eruption" in t:
+        return "volcano"
+    if "landslide" in t:
+        return "landslide"
+    if "wildfire" in t or "forest fire" in t:
+        return "wildfire"
+    return "other"
+
+def _clean_title_and_extract_color(title: str):
     """
-    يحذف اللون الإنجليزي من البداية ويضيف العربي فقط
+    GDACS title غالباً يبدأ بـ: Green / Orange / Red / Yellow
+    نرجع: (color, rest_title)
     """
-    parts = title.split(" ", 1)
+    parts = (title or "").strip().split(" ", 1)
+    if len(parts) == 2 and parts[0] in COLOR_AR:
+        return parts[0], parts[1].strip()
+    return None, (title or "").strip()
 
-    if len(parts) < 2:
-        return title
+def _translate_basic(text: str) -> str:
+    # ترجمة بسيطة (اختياري)
+    x = text
+    x = x.replace("earthquake", "زلزال")
+    x = x.replace("flood alert", "تنبيه فيضانات")
+    x = x.replace("forest fire notification", "تنبيه حرائق غابات")
+    x = x.replace("drought", "جفاف")
+    x = x.replace("cyclone", "إعصار")
+    return x
 
-    color = parts[0]
-    rest = parts[1]
-
-    ar_color = COLOR_AR.get(color)
-
-    if ar_color:
-        return f"{ar_color} {rest}"
-
-    return title
-
-
-def _translate_basic(text):
-    """
-    ترجمة بسيطة لأنواع الأحداث
-    """
-    text = text.replace("earthquake", "زلزال")
-    text = text.replace("flood alert", "تنبيه فيضانات")
-    text = text.replace("forest fire notification", "تنبيه حرائق غابات")
-    text = text.replace("drought", "جفاف")
-    text = text.replace("cyclone", "إعصار")
-    return text
-
-
-def get_events():
-
+def get_events(limit=10):
     url = "https://www.gdacs.org/xml/rss.xml"
-
     r = requests.get(url, timeout=30)
     r.raise_for_status()
 
@@ -52,25 +57,34 @@ def get_events():
     items = root.findall(".//item")
 
     out = []
-
-    for it in items[:10]:
-
-        title = (it.findtext("title") or "").strip()
-        if not title:
+    for it in items[:limit]:
+        raw_title = (it.findtext("title") or "").strip()
+        if not raw_title:
             continue
 
-        title = _clean_title(title)
-        title = _translate_basic(title)
+        color, rest = _clean_title_and_extract_color(raw_title)
+        severity = color or "Green"  # افتراضي
+        ar_color = COLOR_AR.get(severity, "🟢 منخفض")
+
+        # نص العرض (نظيف)
+        display = f"{ar_color} {rest}"
+        display = _translate_basic(display)
+
+        event_type = _detect_event_type(rest)
 
         out.append({
             "section": "gdacs",
-            "title": f"🌍 {title}"
+            "title": f"🌍 {display}",
+            "severity": severity,        # Green/Yellow/Orange/Red
+            "event_type": event_type,    # earthquake/flood/drought/...
         })
 
     if not out:
         return [{
             "section": "gdacs",
-            "title": "لا يوجد أحداث ضمن النطاق حالياً."
+            "title": "لا يوجد أحداث ضمن النطاق حالياً.",
+            "severity": "Green",
+            "event_type": "other",
         }]
 
     return out
