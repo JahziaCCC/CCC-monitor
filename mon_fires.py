@@ -6,16 +6,15 @@ import math
 import requests
 
 # ===== FIRMS API =====
-# Docs: https://firms.modaps.eosdis.nasa.gov/content/academy/data_api/firms_api_use.html
 FIRMS_AREA_CSV = "https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/{bbox}/{days}"
 
-# BBOX لجلب البيانات (واسع نسبياً)، ثم الفلترة الحقيقية داخل السعودية تتم بالـ Polygon
+# BBOX لجلب البيانات، الفلترة الحقيقية تتم بالـ Polygon + Guards
 KSA_BBOX = os.environ.get("FIRMS_KSA_BBOX", "34.4,16.0,55.7,32.2")
 FIRMS_SOURCE = os.environ.get("FIRMS_SOURCE", "VIIRS_SNPP_NRT")
 FIRMS_DAYS = int(os.environ.get("FIRMS_DAYS", "1"))  # 1 = آخر 24 ساعة
 
 TOP_N = int(os.environ.get("FIRMS_TOP_N", "5"))
-MIN_FRP = float(os.environ.get("ALERT_FIRES_FRP", "0"))  # 0 = بدون فلتر
+MIN_FRP = float(os.environ.get("ALERT_FIRES_FRP", "0"))
 
 # وضع جغرافي:
 # IN_KSA = داخل السعودية فقط (افتراضي)
@@ -30,6 +29,7 @@ REF_PLACES = {
     "المدينة": (24.5247, 39.5692),
     "جدة": (21.5433, 39.1728),
     "الدمام": (26.4207, 50.0888),
+    "الجبيل": (27.0174, 49.6233),
     "تبوك": (28.3998, 36.5715),
     "أبها": (18.2164, 42.5053),
     "جازان": (16.8892, 42.5706),
@@ -43,8 +43,6 @@ REF_PLACES = {
     "بريدة": (26.3592, 43.9818),
     "الطائف": (21.2703, 40.4158),
     "ينبع": (24.0889, 38.0618),
-    "الجبيل": (27.0174, 49.6233),
-    "جيزان": (16.8892, 42.5706),
 }
 
 def _haversine_km(lat1, lon1, lat2, lon2):
@@ -92,40 +90,37 @@ def _parse_firms_csv(text):
             continue
     return rows
 
-# ===== Saudi Arabia Polygon (تقريبي واقعي) =====
-# هذا Polygon مبسط يُستخدم للفلترة (أفضل من شرط if)
-# ملاحظة: (lon, lat)
+# ===== Saudi Arabia Polygon (مبسط) =====
+# (lon, lat)
 KSA_POLYGON = [
     (34.5, 16.0),
-    (36.0, 17.5),
-    (38.0, 18.5),
-    (40.0, 20.0),
-    (42.0, 21.5),
-    (44.0, 23.0),
-    (46.0, 24.0),
-    (48.0, 25.0),
-    (50.0, 26.0),
-    (51.5, 27.5),
-    (52.5, 28.5),
-    (52.8, 30.0),
-    (51.0, 31.5),
-    (48.0, 31.8),
-    (44.0, 31.5),
-    (40.0, 30.5),
-    (36.0, 28.0),
+    (36.0, 17.2),
+    (38.2, 18.4),
+    (40.2, 20.0),
+    (42.3, 21.6),
+    (44.5, 23.0),
+    (46.0, 24.2),
+    (47.6, 25.2),
+    (49.2, 26.1),
+    (50.2, 26.6),
+    (50.8, 27.2),
+    (50.9, 28.0),
+    (50.4, 28.8),
+    (49.2, 29.4),
+    (47.0, 30.0),
+    (44.0, 31.0),
+    (40.0, 31.6),
+    (36.6, 30.0),
+    (35.0, 27.0),
     (34.5, 24.0),
     (34.5, 16.0),
 ]
 
 def _point_in_polygon(lat, lon, polygon):
-    """
-    Ray casting algorithm
-    x = lon, y = lat
-    """
+    """Ray casting algorithm"""
     x = lon
     y = lat
     inside = False
-
     n = len(polygon)
     p1x, p1y = polygon[0]
     for i in range(n + 1):
@@ -140,37 +135,51 @@ def _point_in_polygon(lat, lon, polygon):
                     if p1x == p2x or x <= xinters:
                         inside = not inside
         p1x, p1y = p2x, p2y
-
     return inside
 
-def _in_ksa_polygon(lat, lon):
-    # فلتر أولي سريع قبل اختبار الـ polygon
+def _in_ksa_polygon(lat, lon) -> bool:
+    """
+    داخل السعودية فعلياً:
+    1) فلتر سريع bbox
+    2) polygon
+    3) Guards لاستبعاد العراق/إيران/الكويت شمال شرق
+    """
+    # 1) فلتر عام سريع
     if not (16.0 <= lat <= 32.5 and 34.0 <= lon <= 56.0):
         return False
-    return _point_in_polygon(lat, lon, KSA_POLYGON)
+
+    # 2) اختبار Polygon
+    if not _point_in_polygon(lat, lon, KSA_POLYGON):
+        return False
+
+    # 3) Guards (مهم جداً)
+    # أي نقطة شمال المملكة (lat>=29.2) لا يمكن أن تكون شرقية جداً (lon>44.5) داخل السعودية.
+    # هذا يحذف نقاط مثل: 31.03,47.28 و 30.72,49.82
+    if lat >= 29.2 and lon > 44.5:
+        return False
+
+    # استبعاد “زاوية الكويت/البصرة” تقريبياً
+    # (يساعد ضد نقاط قريبة من 29N و 47-49E)
+    if lat >= 28.8 and lon > 47.2:
+        return False
+
+    # استبعاد أقصى الشرق البحري/الخليج إذا كانت شمالية
+    if lat >= 27.8 and lon > 51.5:
+        return False
+
+    return True
 
 def _distance_to_ksa_bbox(lat, lon):
-    """
-    مسافة تقريبية إلى أقرب نقطة داخل BBOX (للـ AROUND_KSA فقط)
-    """
+    """مسافة تقريبية إلى أقرب نقطة داخل BBOX (لـ AROUND_KSA فقط)"""
     lon_min, lat_min, lon_max, lat_max = [float(x) for x in KSA_BBOX.split(",")]
     clamped_lat = min(max(lat, lat_min), lat_max)
     clamped_lon = min(max(lon, lon_min), lon_max)
     return _haversine_km(lat, lon, clamped_lat, clamped_lon)
 
 def fetch():
-    """
-    يرجّع Events لقسم FIRMS:
-    - ملخص
-    - TOP_N نقاط: أقرب مدينة + إحداثيات + FRP + وقت + رابط خرائط
-    """
     key = os.environ.get("FIRMS_MAP_KEY", "").strip()
     if not key:
-        return [{
-            "section": "fires",
-            "title": "⚠️ FIRMS: لا يوجد FIRMS_MAP_KEY في Secrets/Environment.",
-            "meta": {}
-        }]
+        return [{"section": "fires", "title": "⚠️ FIRMS: لا يوجد FIRMS_MAP_KEY في Secrets.", "meta": {}}]
 
     url = FIRMS_AREA_CSV.format(key=key, source=FIRMS_SOURCE, bbox=KSA_BBOX, days=FIRMS_DAYS)
 
@@ -178,27 +187,23 @@ def fetch():
         r = requests.get(url, timeout=45)
         r.raise_for_status()
     except Exception as e:
-        return [{
-            "section": "fires",
-            "title": f"⚠️ FIRMS: تعذر جلب البيانات: {e}",
-            "meta": {"url": url}
-        }]
+        return [{"section": "fires", "title": f"⚠️ FIRMS: تعذر جلب البيانات: {e}", "meta": {"url": url}}]
 
     rows = _parse_firms_csv(r.text)
 
+    # فلتر FRP (اختياري)
     if MIN_FRP > 0:
         rows = [x for x in rows if x["frp"] >= MIN_FRP]
 
-    # فلترة جغرافية: داخل السعودية فعلياً بالـ Polygon
+    # فلترة جغرافية
     filtered = []
     for x in rows:
         inside = _in_ksa_polygon(x["lat"], x["lon"])
-
         if GEO_MODE == "IN_KSA":
             if inside:
                 filtered.append(x)
         else:
-            # AROUND_KSA: داخل السعودية + حولها بمسافة
+            # AROUND_KSA
             if inside:
                 filtered.append(x)
             else:
@@ -214,7 +219,6 @@ def fetch():
 
     count = len(rows)
     max_frp = max(x["frp"] for x in rows) if rows else 0.0
-
     top = sorted(rows, key=lambda x: x["frp"], reverse=True)[:TOP_N]
 
     scope_text = "داخل السعودية" if GEO_MODE == "IN_KSA" else f"داخل/حول السعودية (≤ {AROUND_KM:.0f} كم)"
