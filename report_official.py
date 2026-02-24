@@ -12,7 +12,11 @@ BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
-def _now_ksa():
+# ======================
+# HELPERS
+# ======================
+
+def _now():
     return datetime.datetime.now(tz=KSA_TZ)
 
 
@@ -20,125 +24,129 @@ def _load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except:
         return {}
 
 
-def _save_state(state: dict):
+def _save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _sha(txt):
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
 
 
-def _tg_send(text: str):
-    if not BOT or not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+def _tg_send(text):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-
-    # محاولة خفيفة لتقليل فشل Telegram timeout
-    for attempt in range(2):
-        try:
-            r = requests.post(
-                url,
-                json={
-                    "chat_id": CHAT_ID,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                },
-                timeout=40,
-            )
-            r.raise_for_status()
-            return
-        except Exception as e:
-            if attempt == 1:
-                raise
-            print(f"[WARN] telegram send failed, retrying: {e}")
+    requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True
+    }, timeout=40)
 
 
-def _normalize_section(sec: str) -> str:
-    sec = (sec or "other").strip().lower()
+# ======================
+# GROUPING
+# ======================
 
-    if sec in ["fire", "fires", "firms"]:
-        return "fires"
-    if sec in ["gdac", "gdacs", "disaster", "disasters"]:
-        return "gdacs"
-    if sec in ["ukmto", "marine"]:
-        return "ukmto"
-    if sec in ["ais", "ports", "ships"]:
-        return "ais"
-    if sec in ["food", "supply", "supply_chain"]:
-        return "food"
+def _group(events):
+    g = {
+        "food": [],
+        "gdacs": [],
+        "fires": [],
+        "ukmto": [],
+        "ais": [],
+        "other": []
+    }
 
-    return sec
-
-
-def _group_events(events):
-    grouped = {"food": [], "gdacs": [], "fires": [], "ukmto": [], "ais": [], "other": []}
     for e in events or []:
-        sec = _normalize_section(e.get("section") or "other")
-        if sec not in grouped:
+        sec = (e.get("section") or "other").lower()
+        if sec not in g:
             sec = "other"
-        grouped[sec].append(e)
-    return grouped
+        g[sec].append(e)
+
+    return g
 
 
-def _lines_from_titles(items, limit=12):
+# ======================
+# CLEAN LIST LINES
+# ======================
+
+def _lines(items, limit=10):
     out = []
+
     for e in (items or [])[:limit]:
-        t = e.get("title") or ""
-        t = str(t).strip()
-        if t:
-            out.append(f"- {t}")
+        t = str(e.get("title", "")).strip()
+
+        if not t:
+            continue
+
+        # منع - - لا يوجد
+        t = t.lstrip("- ").strip()
+
+        out.append(f"- {t}")
+
     return out if out else ["- لا يوجد"]
 
 
-def _top_event(grouped):
-    # نختار أبرز حدث: fire داخل السعودية > gdacs > لا يوجد
-    if grouped.get("fires"):
-        return grouped["fires"][0].get("title") or "🔥 حرائق داخل السعودية"
-    if grouped.get("gdacs"):
-        return grouped["gdacs"][0].get("title") or "🌍 حدث GDACS"
-    return "لا يوجد"
+# ======================
+# GDACS ARABIC
+# ======================
+
+def _translate_gdacs(line):
+
+    repl = {
+        "earthquake": "زلزال",
+        "flood": "فيضانات",
+        "drought": "جفاف",
+        "storm": "عاصفة",
+        "Green": "🟢 منخفض",
+        "Orange": "🟠 متوسط",
+        "Red": "🔴 مرتفع"
+    }
+
+    for k, v in repl.items():
+        line = line.replace(k, v)
+
+    return line
 
 
-def _risk_score(grouped):
+# ======================
+# RISK SCORE (مخفف)
+# ======================
+
+def _risk(grouped):
+
+    fires = grouped["fires"]
+    gdacs = grouped["gdacs"]
+
     score = 0
     explain = []
 
-    fires = grouped.get("fires") or []
-    gdacs = grouped.get("gdacs") or []
-
     if fires:
-        # افتراض: أول عنصر fires هو "ملخص" من mon_fires
-        meta = fires[0].get("meta") or {}
-        count = int(meta.get("count") or 0)
-        top_frp = float(meta.get("top_frp") or 0)
+        meta = fires[0].get("meta", {})
+        count = int(meta.get("count", 0))
+        frp = float(meta.get("top_frp", 0))
 
-        if count >= 200 or top_frp >= 80:
-            score += 65
+        if count >= 200:
+            score += 50
             explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (تأثير مرتفع).")
-        elif count >= 50 or top_frp >= 50:
-            score += 40
+        elif count >= 50:
+            score += 35
             explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (للاطلاع).")
         else:
-            score += 25
-            explain.append("• العامل الرئيسي: مؤشرات حرائق بسيطة داخل المملكة (للاطلاع).")
+            score += 20
+            explain.append("• العامل الرئيسي: مؤشرات حرائق بسيطة داخل المملكة.")
+
     else:
         explain.append("• العامل الرئيسي: لا توجد مؤشرات داخل المملكة حالياً.")
 
-    # GDACS فقط للتوعية إذا ما ذكر السعودية (حسب منطقك الحالي)
     if gdacs:
         explain.append("• GDACS: حدث إقليمي للتوعية.")
-        score += 10
+        score += 5
 
-    # سقف
-    if score > 100:
-        score = 100
-
-    return score, explain
+    return min(score, 100), explain
 
 
 def _risk_level(score):
@@ -151,17 +159,27 @@ def _risk_level(score):
     return "🟢 منخفض"
 
 
-def _build_report_text(report_title: str, grouped: dict, include_ais: bool):
-    now = _now_ksa()
-    report_id = f"RPT-{now.strftime('%Y%m%d-%H%M%S')}"
+# ======================
+# BUILD REPORT
+# ======================
 
-    score, explain = _risk_score(grouped)
+def _build(title, grouped, include_ais=True):
+
+    now = _now()
+    report_id = now.strftime("RPT-%Y%m%d-%H%M%S")
+
+    score, explain = _risk(grouped)
     level = _risk_level(score)
-    top = _top_event(grouped)
+
+    top = "لا يوجد"
+    if grouped["fires"]:
+        top = grouped["fires"][0]["title"]
+    elif grouped["gdacs"]:
+        top = grouped["gdacs"][0]["title"]
 
     text = []
-    # Header
-    text.append(report_title)
+
+    text.append(title)
     text.append(f"رقم التقرير: {report_id}")
     text.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
     text.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
@@ -176,103 +194,71 @@ def _build_report_text(report_title: str, grouped: dict, include_ais: bool):
     text.append(f"📊 مؤشر المخاطر الموحد: {score}/100")
     text.append(f"📌 مستوى المخاطر: {level}")
     text.append("")
-    text.append("📌 الحالة العامة: مراقبة")
-    text.append("📈 مقارنة بالفترة السابقة: — (لا توجد مقارنة سابقة)")
-    text.append("")
     text.append("📍 أبرز حدث خلال آخر 6 ساعات:")
-    text.append(str(top))
+    text.append(top)
     text.append("")
     text.append("🧾 تفسير تشغيلي:")
-    for line in explain:
-        text.append(str(line))
-    text.append("")
-    text.append("📍 المناطق الأكثر تأثرًا:")
-    text.append("- مدن داخل المملكة")
-    text.append("- الدول المجاورة")
+    text.extend(explain)
+
     text.append("")
     text.append("════════════════════")
     text.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
-    text.append("")
-    text.extend(_lines_from_titles(grouped.get("food"), limit=8))
+    text.extend(_lines(grouped["food"]))
+
     text.append("")
     text.append("════════════════════")
     text.append("3️⃣ الكوارث الطبيعية")
-    text.append("")
-    gd_lines = _lines_from_titles(grouped.get("gdacs"), limit=8)
-    # لو لا يوجد: خليها عربية أوضح
-    if gd_lines == ["- لا يوجد"]:
-        gd_lines = ["- لا يوجد أحداث ضمن النطاق حالياً."]
-    text.extend(gd_lines)
+
+    gd = [_translate_gdacs(x) for x in _lines(grouped["gdacs"])]
+    text.extend(gd)
+
     text.append("")
     text.append("════════════════════")
     text.append("4️⃣ حرائق الغابات")
-    text.append("")
-    text.extend(_lines_from_titles(grouped.get("fires"), limit=12))
+    text.extend(_lines(grouped["fires"], 12))
+
     text.append("")
     text.append("════════════════════")
     text.append("5️⃣ الأحداث والتحذيرات البحرية")
-    text.append("")
-    text.extend(_lines_from_titles(grouped.get("ukmto"), limit=8))
+    text.extend(_lines(grouped["ukmto"]))
+
     text.append("")
     text.append("════════════════════")
     text.append("6️⃣ حركة السفن وازدحام الموانئ")
-    text.append("")
-    if include_ais:
-        text.extend(_lines_from_titles(grouped.get("ais"), limit=8))
-    else:
-        text.append("- لا يوجد")
+    text.extend(_lines(grouped["ais"] if include_ais else []))
+
     text.append("")
     text.append("════════════════════")
     text.append("7️⃣ ملاحظات تشغيلية")
-    text.append("")
     text.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
     text.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
 
-    # تأكد كلها نصوص
-    text = [str(x) for x in text]
-    return "\n".join(text)
+    return "\n".join([str(x) for x in text])
 
 
-def run(*args, **kwargs):
-    """
-    يدعم:
-      run(events)
-      run(events=..., report_title=..., only_if_new=..., include_ais=...)
-      run(report_title, events, ...)
-    """
+# ======================
+# RUN (متوافق مع كل نسخ main.py)
+# ======================
 
-    # استخراج بارامترات بشكل مرن
-    events = kwargs.get("events", None)
-    report_title = kwargs.get("report_title", "📄 تقرير الرصد والتحديث التشغيلي")
-    only_if_new = bool(kwargs.get("only_if_new", False))
-    include_ais = bool(kwargs.get("include_ais", True))
+def run(events=None, report_title="📄 تقرير الرصد والتحديث التشغيلي",
+        only_if_new=False, include_ais=True):
 
-    # دعم run(events) كأول positional
-    if events is None and len(args) >= 1 and isinstance(args[0], list):
-        events = args[0]
+    events = events or []
 
-    # دعم run(title, events)
-    if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], list):
-        report_title = args[0]
-        events = args[1]
+    grouped = _group(events)
 
-    if events is None:
-        events = []
+    report = _build(report_title, grouped, include_ais)
 
-    grouped = _group_events(events)
-    report_text = _build_report_text(report_title, grouped, include_ais)
-
-    # only_if_new logic
     state = _load_state()
-    digest = _sha(report_text)
-    last = state.get("last_report_sha")
+    h = _sha(report)
 
-    if only_if_new and last == digest:
-        print("[INFO] report unchanged; skipping telegram send")
-        return report_text
+    if only_if_new and state.get("last") == h:
+        print("no changes")
+        return report
 
-    _tg_send(report_text)
-    state["last_report_sha"] = digest
+    _tg_send(report)
+
+    state["last"] = h
     _save_state(state)
 
-    return report_text
+    return report
