@@ -2,9 +2,7 @@
 import os
 import time
 import requests
-import re
 
-# ✅ نقاط تمثيلية (15) — عدّلها كما تريد
 CITIES = [
     ("الرياض", 24.7136, 46.6753),
     ("مكة", 21.3891, 39.8579),
@@ -27,13 +25,12 @@ CITIES = [
 
 OPEN_METEO_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-PM10_HIGH = float(os.environ.get("PM10_HIGH", "300"))         # حد “مرتفع”
-PM10_VERY_HIGH = float(os.environ.get("PM10_VERY_HIGH", "1500"))  # “شديد جداً” للتنبيه
+PM10_HIGH = float(os.environ.get("PM10_HIGH", "300"))
+PM10_VERY_HIGH = float(os.environ.get("PM10_VERY_HIGH", "1500"))
 
-# إعدادات مقاومة التعطل
-REQ_TIMEOUT = int(os.environ.get("DUST_TIMEOUT", "40"))   # 40s بدل 25
-RETRIES = int(os.environ.get("DUST_RETRIES", "3"))        # إعادة المحاولة
-SLEEP_BETWEEN = float(os.environ.get("DUST_SLEEP", "1.2"))# تهدئة بسيطة بين المدن
+REQ_TIMEOUT = int(os.environ.get("DUST_TIMEOUT", "40"))
+RETRIES = int(os.environ.get("DUST_RETRIES", "3"))
+SLEEP_BETWEEN = float(os.environ.get("DUST_SLEEP", "1.2"))
 
 def _request_pm10(lat, lon):
     params = {
@@ -43,7 +40,6 @@ def _request_pm10(lat, lon):
         "timezone": "UTC",
         "past_days": 1
     }
-
     last_err = None
     for i in range(RETRIES):
         try:
@@ -56,49 +52,49 @@ def _request_pm10(lat, lon):
             return pm10[-1]
         except Exception as e:
             last_err = e
-            # backoff بسيط
             time.sleep(0.8 * (i + 1))
-
-    # بعد كل المحاولات
     raise last_err
 
 def fetch():
     events = []
-    failed = []
+    failed = 0
 
     for name, lat, lon in CITIES:
         try:
             val = _request_pm10(lat, lon)
-
             if val is None:
-                failed.append(name)
+                failed += 1
             else:
                 v = int(round(val))
-                if v >= PM10_HIGH:
-                    events.append({
-                        "section": "dust",
-                        "title": f"🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³",
-                        "value": v
-                    })
+
+                # ✅ نعرض كل المدن دائمًا، لكن نغير الوصف حسب المستوى
+                if v >= PM10_VERY_HIGH:
+                    title = f"⚠️ غبار شديد جدًا — {name}: {v} µg/m³"
+                elif v >= PM10_HIGH:
+                    title = f"🌪️ مؤشر غبار مرتفع — {name}: {v} µg/m³"
+                else:
+                    title = f"✅ غبار ضمن الطبيعي — {name}: {v} µg/m³"
+
+                events.append({
+                    "section": "dust",
+                    "title": title,
+                    "value": v
+                })
+
         except Exception:
-            failed.append(name)
+            failed += 1
 
         time.sleep(SLEEP_BETWEEN)
 
     # ترتيب تنازلي
     events.sort(key=lambda x: int(x.get("value", 0)), reverse=True)
 
-    # ✅ لا نطبع أخطاء داخل التقرير (بدون تشويش)
-    # لو فشلت مدن، نضيف ملاحظة واحدة مختصرة “غير مؤثرة”
+    # ملاحظة واحدة فقط لو فيه فشل
     if failed:
         events.append({
             "section": "dust",
-            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {len(failed)} مواقع (مؤقتاً).",
+            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {failed} مواقع (مؤقتاً).",
             "value": -1
         })
-
-    # لو ما فيه أي غبار مرتفع
-    if not any(e.get("value", 0) >= PM10_HIGH for e in events):
-        return []
 
     return events
