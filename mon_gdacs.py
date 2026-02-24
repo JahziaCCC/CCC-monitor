@@ -9,9 +9,42 @@ COLOR_AR = {
     "Yellow": "🟡 متوسط",
 }
 
+def _clean_title(title):
+    """
+    يحذف اللون الإنجليزي من البداية ويضيف العربي فقط
+    """
+    parts = title.split(" ", 1)
+
+    if len(parts) < 2:
+        return title
+
+    color = parts[0]
+    rest = parts[1]
+
+    ar_color = COLOR_AR.get(color)
+
+    if ar_color:
+        return f"{ar_color} {rest}"
+
+    return title
+
+
+def _translate_basic(text):
+    """
+    ترجمة بسيطة لأنواع الأحداث
+    """
+    text = text.replace("earthquake", "زلزال")
+    text = text.replace("flood alert", "تنبيه فيضانات")
+    text = text.replace("forest fire notification", "تنبيه حرائق غابات")
+    text = text.replace("drought", "جفاف")
+    text = text.replace("cyclone", "إعصار")
+    return text
+
+
 def get_events():
-    # RSS رسمي
+
     url = "https://www.gdacs.org/xml/rss.xml"
+
     r = requests.get(url, timeout=30)
     r.raise_for_status()
 
@@ -19,26 +52,25 @@ def get_events():
     items = root.findall(".//item")
 
     out = []
+
     for it in items[:10]:
+
         title = (it.findtext("title") or "").strip()
         if not title:
             continue
 
-        # مثال عنوان GDACS: "Green earthquake ..."
-        # ناخذ أول كلمة لون:
-        first = title.split(" ", 1)[0]
-        ar = COLOR_AR.get(first, "")
+        title = _clean_title(title)
+        title = _translate_basic(title)
 
-        # ترجمة بسيطة لأنواع
-        t_ar = title
-        t_ar = t_ar.replace("earthquake", "زلزال")
-        t_ar = t_ar.replace("flood alert", "تنبيه فيضانات")
-        t_ar = t_ar.replace("drought", "جفاف")
-        t_ar = t_ar.replace("cyclone", "إعصار")
+        out.append({
+            "section": "gdacs",
+            "title": f"🌍 {title}"
+        })
 
-        if ar:
-            t_ar = t_ar.replace(first, f"{first} {ar}", 1)
+    if not out:
+        return [{
+            "section": "gdacs",
+            "title": "لا يوجد أحداث ضمن النطاق حالياً."
+        }]
 
-        out.append({"section": "gdacs", "title": f"🌍 {t_ar}"})
-
-    return out if out else [{"section": "gdacs", "title": "لا يوجد أحداث ضمن النطاق حالياً."}]
+    return out
