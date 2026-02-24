@@ -1,113 +1,161 @@
-# mon_fires.py
+# mon_firms.py
 import os
+import datetime
 import math
 import requests
-import datetime
 
-FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "").strip()
+# ===== إعدادات =====
+FIRMS_MAP_KEY = os.environ.get("FIRMS_MAP_KEY", "")
+FIRMS_SOURCE = os.environ.get("FIRMS_SOURCE", "VIIRS_SNPP_NRT")  # أو VIIRS_NOAA20_NRT
+FIRMS_DAYS = int(os.environ.get("FIRMS_DAYS", "1"))              # آخر كم يوم
+FIRMS_TIMEOUT = int(os.environ.get("FIRMS_TIMEOUT", "25"))
 
-# نطاق تقريبي للمملكة + الجوار (تقدر تضبطه)
-BBOX_KSA = (34.0, 16.0, 56.5, 33.5)  # (minLon, minLat, maxLon, maxLat)
+# نطاق السعودية التقريبي (يمكن تغييره)
+KSA_BBOX = (33.0, 14.5, 57.5, 33.8)  # west, south, east, north
 
-# مراجع قريبة (مدن/موانئ) لتسمية "قرب ..."
-REFS = [
-    ("الرياض", 24.7136, 46.6753),
-    ("جدة", 21.4858, 39.1925),
-    ("مكة", 21.3891, 39.8579),
-    ("المدينة", 24.5247, 39.5692),
-    ("الدمام", 26.4207, 50.0888),
-    ("الجبيل", 27.00, 49.65),
-    ("تبوك", 28.3838, 36.5662),
-    ("حائل", 27.5114, 41.7208),
-    ("عرعر", 30.9753, 41.0381),
-    ("العلا", 26.6085, 37.9232),
-    ("نيوم", 29.0, 35.0),
-]
+UTC = datetime.timezone.utc
 
-def _haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    p = math.pi / 180.0
-    dlat = (lat2 - lat1) * p
-    dlon = (lon2 - lon1) * p
-    a = math.sin(dlat/2)**2 + math.cos(lat1*p)*math.cos(lat2*p)*math.sin(dlon/2)**2
-    return 2 * R * math.asin(math.sqrt(a))
+# مدن/مناطق مرجعية داخل السعودية (وسعها براحتك)
+CITIES = {
+    "الرياض": (24.7136, 46.6753),
+    "مكة": (21.3891, 39.8579),
+    "المدينة": (24.5247, 39.5692),
+    "جدة": (21.5433, 39.1728),
+    "الدمام": (26.4207, 50.0888),
+    "الجبيل": (27.0046, 49.6460),
+    "الأحساء": (25.3830, 49.5866),
+    "تبوك": (28.3998, 36.5715),
+    "حائل": (27.5114, 41.7208),
+    "عرعر": (30.9753, 41.0381),
+    "سكاكا": (29.9697, 40.2064),
+    "أبها": (18.2164, 42.5053),
+    "جازان": (16.8892, 42.5706),
+    "نجران": (17.5650, 44.2289),
+    "الباحة": (20.0129, 41.4677),
+    "القصيم (بريدة)": (26.3592, 43.9818),
+    "العلا": (26.6086, 37.9232),
+    "نيوم": (28.2683, 35.2020),
+}
 
-def _nearest_ref(lat, lon):
-    best = None
-    for name, rlat, rlon in REFS:
-        d = _haversine_km(lat, lon, rlat, rlon)
-        if best is None or d < best[0]:
-            best = (d, name)
-    if not best:
-        return None, None
-    return best[1], int(best[0])
+def _haversine_km(lat1, lon1, lat2, lon2) -> float:
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return r * c
+
+def _nearest_city(lat, lon):
+    best_name, best_km = None, 10**9
+    for name, (clat, clon) in CITIES.items():
+        d = _haversine_km(lat, lon, clat, clon)
+        if d < best_km:
+            best_name, best_km = name, d
+    return best_name, best_km
 
 def _firms_url():
-    # VIIRS SNPP NRT (CSV)
-    minLon, minLat, maxLon, maxLat = BBOX_KSA
-    # آخر 1 يوم
-    return f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/VIIRS_SNPP_NRT/{minLon},{minLat},{maxLon},{maxLat}/1"
-
-def get_events():
+    # API FIRMS: CSV داخل bbox
+    # مثال:
+    # https://firms.modaps.eosdis.nasa.gov/api/area/csv/<MAP_KEY>/<SOURCE>/<WEST,SOUTH,EAST,NORTH>/<DAYS>/
     if not FIRMS_MAP_KEY:
-        return [{"section": "fires", "title": "ℹ️ FIRMS غير مفعّل: ضع FIRMS_MAP_KEY."}]
+        return None
+    w, s, e, n = KSA_BBOX
+    bbox = f"{w},{s},{e},{n}"
+    return f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_MAP_KEY}/{FIRMS_SOURCE}/{bbox}/{FIRMS_DAYS}/"
 
-    url = _firms_url()
-    r = requests.get(url, timeout=45)
-    r.raise_for_status()
-    text = r.text.strip().splitlines()
+def _parse_csv(text: str):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return []
 
-    # أول سطر headers
-    if len(text) <= 1:
-        return [{"section": "fires", "title": "- لا يوجد"}]
+    header = lines[0].split(",")
+    idx = {k: i for i, k in enumerate(header)}
 
-    headers = text[0].split(",")
-    rows = text[1:]
+    def g(row, key, default=""):
+        i = idx.get(key)
+        if i is None or i >= len(row):
+            return default
+        return row[i]
 
-    def idx(name):
-        return headers.index(name)
-
-    i_lat = idx("latitude")
-    i_lon = idx("longitude")
-    i_frp = idx("frp")
-    i_date = idx("acq_date")
-    i_time = idx("acq_time")
-
-    points = []
-    for line in rows:
-        parts = line.split(",")
+    out = []
+    for ln in lines[1:]:
+        row = ln.split(",")
         try:
-            lat = float(parts[i_lat])
-            lon = float(parts[i_lon])
-            frp = float(parts[i_frp])
-            ad = parts[i_date]
-            at = parts[i_time]
-            # UTC time
-            when = f"{ad} {at[:2]}{at[2:]} UTC"
-            points.append((frp, lat, lon, when))
+            lat = float(g(row, "latitude"))
+            lon = float(g(row, "longitude"))
         except Exception:
             continue
 
-    if not points:
-        return [{"section": "fires", "title": "- لا يوجد"}]
+        try:
+            frp = float(g(row, "frp", "0") or 0)
+        except Exception:
+            frp = 0.0
 
-    points.sort(reverse=True, key=lambda x: x[0])
-    count = len(points)
-    max_frp = points[0][0]
+        # وقت/تاريخ
+        acq_date = g(row, "acq_date", "")
+        acq_time = g(row, "acq_time", "")
+        ts = f"{acq_date} {acq_time}".strip()
 
-    events = []
-    events.append({
-        "section": "fires",
-        "title": f"🔥 حرائق نشطة داخل السعودية — {count} رصد خلال آخر 24 ساعة (أعلى FRP: {max_frp:.1f})"
-    })
+        out.append({
+            "lat": lat,
+            "lon": lon,
+            "frp": frp,
+            "ts": ts
+        })
+    return out
 
-    for i, (frp, lat, lon, when) in enumerate(points[:5], start=1):
-        ref, dist = _nearest_ref(lat, lon)
-        near = f"قرب {ref} (~{dist} كم)" if ref else "موقع غير محدد"
-        gmap = f"https://maps.google.com/?q={lat:.5f},{lon:.5f}"
+def get_events():
+    """
+    يرجع Events لقسم fires بالشكل المتوافق مع report_official.py:
+    [
+      {"section":"fires","title":"..."}
+    ]
+    """
+    url = _firms_url()
+    if not url:
+        return [{
+            "section": "fires",
+            "title": "ℹ️ FIRMS غير مفعّل: ضع FIRMS_MAP_KEY."
+        }]
+
+    try:
+        r = requests.get(url, timeout=FIRMS_TIMEOUT)
+        r.raise_for_status()
+        rows = _parse_csv(r.text)
+
+        if not rows:
+            return []
+
+        # احصائيات
+        count = len(rows)
+        max_frp = max(x["frp"] for x in rows) if rows else 0.0
+
+        # خذ أعلى 5 نقاط حسب FRP
+        top = sorted(rows, key=lambda x: x["frp"], reverse=True)[:5]
+
+        events = []
         events.append({
             "section": "fires",
-            "title": f"📍 نقطة #{i}: {near} | {lat:.5f},{lon:.5f} | FRP {frp:.1f} | {when} | {gmap}"
+            "title": f"🔥 حرائق نشطة داخل السعودية — {count} رصد خلال آخر 24 ساعة (أعلى FRP: {max_frp:.1f})"
         })
 
-    return events
+        for i, p in enumerate(top, start=1):
+            city, km = _nearest_city(p["lat"], p["lon"])
+            maps = f"https://maps.google.com/?q={p['lat']:.5f},{p['lon']:.5f}"
+            events.append({
+                "section": "fires",
+                "title": (
+                    f"📍 نقطة #{i}: قرب {city} (~{km:.0f} كم) | "
+                    f"{p['lat']:.5f},{p['lon']:.5f} | FRP {p['frp']:.1f} | {p['ts']} | {maps}"
+                )
+            })
+
+        return events
+
+    except Exception as e:
+        return [{
+            "section": "fires",
+            "title": f"ℹ️ ملاحظة: تعذر جلب بيانات FIRMS مؤقتاً. ({type(e).__name__})"
+        }]
