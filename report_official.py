@@ -41,7 +41,6 @@ def _tg_send(text: str):
     r.raise_for_status()
 
 def _group_events(events):
-    # ✅ أضفنا ops_note
     grouped = {
         "dust": [],
         "food": [],
@@ -49,7 +48,8 @@ def _group_events(events):
         "fires": [],
         "ukmto": [],
         "ais": [],
-        "ops_note": [],   # ✅ جديد
+        "pm10_list": [],   # ✅ جديد
+        "ops_note": [],
         "other": []
     }
     for e in events or []:
@@ -67,7 +67,6 @@ def _lines_from_titles(items, limit=12):
             out.append(f"- {t.strip()}")
     return out if out else ["- لا يوجد"]
 
-# ✅ استخراج رقم قوي (يدعم 3,255 و 3٬255 و 3 255 و 3255)
 _NUM_RE = re.compile(r"(\d[\d\s,.\u00A0\u2009\u202F\u066B\u066C]*\d|\d)")
 
 def _parse_best_int(text: str):
@@ -79,8 +78,8 @@ def _parse_best_int(text: str):
         cleaned = (
             m.replace(",", "")
              .replace(".", "")
-             .replace("\u066C", "")  # ٬
-             .replace("\u066B", "")  # ٫
+             .replace("\u066C", "")
+             .replace("\u066B", "")
              .replace("\u00A0", "")
              .replace("\u2009", "")
              .replace("\u202F", "")
@@ -94,7 +93,7 @@ def _parse_best_int(text: str):
     return max(nums) if nums else None
 
 def _extract_top_dust(dust_items):
-    best = None  # (value, title)
+    best = None
     for e in dust_items:
         t = e.get("title", "")
         v = _parse_best_int(t)
@@ -106,7 +105,6 @@ def _extract_top_dust(dust_items):
 def _risk_score(grouped):
     score = 0
 
-    # Dust
     top = _extract_top_dust(grouped["dust"])
     if top:
         v = top[0]
@@ -119,7 +117,6 @@ def _risk_score(grouped):
         elif v >= 300:
             score += 8
 
-    # GDACS
     for e in grouped["gdacs"]:
         t = (e.get("title") or "").lower()
         if "red" in t:
@@ -129,7 +126,6 @@ def _risk_score(grouped):
         elif "yellow" in t:
             score += 10
 
-    # Fires
     if grouped["fires"]:
         c = 0
         for e in grouped["fires"]:
@@ -146,15 +142,12 @@ def _risk_score(grouped):
         else:
             score += 5
 
-    # UKMTO
     if any((e.get("title") or "").strip() for e in grouped["ukmto"]):
         score += 18
 
-    # AIS
     if any((e.get("title") or "").strip() for e in grouped["ais"]):
         score += 10
 
-    # Food
     if any((e.get("title") or "").strip() for e in grouped["food"]):
         score += 8
 
@@ -170,21 +163,26 @@ def _risk_level(score: int):
     return "🟢 منخفض"
 
 def _pick_highlight(grouped):
-    # ✅ تجاهل ops_note و other تماماً
-    # لو GDACS يذكر السعودية -> GDACS، وإلا أعلى غبار داخل المملكة
+    # ✅ 1) لو GDACS يذكر السعودية -> خذه
     for e in grouped["gdacs"]:
         t = e.get("title") or ""
         if ("Saudi" in t) or ("السعودية" in t) or ("KSA" in t):
             return t
 
+    # ✅ 2) لو عندنا غبار مرتفع داخل المملكة -> خذه
     top = _extract_top_dust(grouped["dust"])
     if top:
         return top[1]
 
-    # fallback من أقسام الرصد فقط (بدون ops_note/other)
-    for k in ["fires", "ukmto", "ais", "gdacs", "dust"]:
+    # ✅ 3) لو لا يوجد مؤشرات داخل المملكة لكن فيه GDACS -> خله أبرز حدث كتوعية
+    if grouped["gdacs"]:
+        return grouped["gdacs"][0].get("title") or "لا يوجد"
+
+    # ✅ 4) باقي المصادر
+    for k in ["fires", "ukmto", "ais"]:
         if grouped[k]:
             return grouped[k][0].get("title") or "لا يوجد"
+
     return "لا يوجد"
 
 def build_report_text(title: str, events: list):
@@ -257,20 +255,23 @@ def build_report_text(title: str, events: list):
     txt.append("6️⃣ حركة السفن وازدحام الموانئ (AIS)\n")
     txt.extend(_lines_from_titles(grouped["ais"], limit=10))
 
+    # ✅ قسم PM10: نطبع القائمة التي أتت من mon_dust مهما كانت
     txt.append("\n════════════════════")
     txt.append("7️⃣ مؤشرات الغبار وجودة الهواء (PM10)\n")
-    txt.extend(_lines_from_titles(grouped["dust"], limit=17))
+    pm10_lines = []
+    for obj in grouped["pm10_list"]:
+        pm10_lines.extend(obj.get("pm10_lines") or [])
+    if pm10_lines:
+        txt.extend(pm10_lines)
+    else:
+        txt.append("- لا يوجد")
 
     txt.append("\n════════════════════")
     txt.append("8️⃣ ملاحظات تشغيلية\n")
-
-    # ✅ اطبع ملاحظات ops_note أولاً (إن وجدت)
     for e in grouped["ops_note"]:
         t = (e.get("title") or "").strip()
         if t:
             txt.append(f"• {t}")
-
-    # النص الثابت
     txt.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
     txt.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
 
