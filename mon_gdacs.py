@@ -1,33 +1,36 @@
 # mon_gdacs.py
+import os
 import requests
 
-GDACS_URL = "https://www.gdacs.org/xml/rss.xml"
+GDACS_URL = os.environ.get("GDACS_API_URL", "https://www.gdacs.org/gdacsapi/api/events/geteventlist/V2")
 
+NEARBY_KEYWORDS = [
+    "Saudi", "Saudi Arabia", "KSA",
+    "UAE", "United Arab Emirates",
+    "Qatar", "Bahrain", "Kuwait", "Oman", "Yemen",
+    "Jordan", "Iraq", "Syria", "Iran", "Turkey", "Türkiye",
+    "Lebanon", "Palestine",
+    "Gulf", "Red Sea"
+]
 
-def collect():
-    try:
-        r = requests.get(GDACS_URL, timeout=30)
-        r.raise_for_status()
-        xml = r.text
+def _is_nearby(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in NEARBY_KEYWORDS)
 
-        # استخراج بسيط جداً من RSS (بدون مكتبات إضافية)
-        items = xml.split("<item>")[1:]
-        out = []
-        for it in items[:8]:
-            title = _between(it, "<title>", "</title>")
-            if title:
-                title = title.replace("&gt;", ">").replace("&lt;", "<").strip()
-                out.append({"section": "gdacs", "title": f"🌍 {title}"})
+def get_events():
+    # ملاحظة: صيغة GDACS تختلف حسب endpoint.
+    # إذا endpoint عندك مختلف، الصق لي رابطك الفعلي وسأعدّلها 100% على بياناتك.
+    r = requests.get(GDACS_URL, timeout=40)
+    r.raise_for_status()
+    data = r.json()
 
-        return out if out else [{"section": "gdacs", "title": "- لا يوجد"}]
-    except Exception:
-        return [{"section": "gdacs", "title": "- لا يوجد"}]
+    events = []
+    for it in (data or []):
+        title = (it.get("title") or it.get("eventname") or "").strip()
+        if not title:
+            continue
+        if not _is_nearby(title):
+            continue
+        events.append({"section": "gdacs", "title": f"🌍 {title}"})
 
-
-def _between(text, a, b):
-    try:
-        i = text.index(a) + len(a)
-        j = text.index(b, i)
-        return text[i:j]
-    except Exception:
-        return ""
+    return events
