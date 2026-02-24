@@ -56,8 +56,9 @@ def _request_pm10(lat, lon):
     raise last_err
 
 def fetch():
-    events = []
+    dust_events = []
     failed = 0
+    ok = 0
 
     for name, lat, lon in CITIES:
         try:
@@ -65,9 +66,9 @@ def fetch():
             if val is None:
                 failed += 1
             else:
+                ok += 1
                 v = int(round(val))
 
-                # ✅ نعرض كل المدن دائمًا، لكن نغير الوصف حسب المستوى
                 if v >= PM10_VERY_HIGH:
                     title = f"⚠️ غبار شديد جدًا — {name}: {v} µg/m³"
                 elif v >= PM10_HIGH:
@@ -75,7 +76,7 @@ def fetch():
                 else:
                     title = f"✅ غبار ضمن الطبيعي — {name}: {v} µg/m³"
 
-                events.append({
+                dust_events.append({
                     "section": "dust",
                     "title": title,
                     "value": v
@@ -86,15 +87,20 @@ def fetch():
 
         time.sleep(SLEEP_BETWEEN)
 
-    # ترتيب تنازلي
-    events.sort(key=lambda x: int(x.get("value", 0)), reverse=True)
+    dust_events.sort(key=lambda x: int(x.get("value", 0)), reverse=True)
 
-    # ملاحظة واحدة فقط لو فيه فشل
+    # ✅ مهم: لا نرجع "ملاحظة" ضمن قسم dust حتى لا تصبح أبرز حدث
+    events = dust_events[:]
+
     if failed:
         events.append({
-            "section": "dust",
+            "section": "ops_note",   # <-- ليست dust
             "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {failed} مواقع (مؤقتاً).",
             "value": -1
         })
+
+    # لو ما نجح ولا موقع: نرجع فقط الملاحظة (ops_note) بدون dust
+    if ok == 0:
+        return [e for e in events if e["section"] == "ops_note"]
 
     return events
