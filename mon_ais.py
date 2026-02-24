@@ -2,15 +2,18 @@
 import os
 
 def get_events():
-    key = os.environ.get("AISSTREAM_API_KEY", "")
-    base = os.environ.get("AIS_BASE_URL", "")
-    api = os.environ.get("AIS_API_KEY", "")
+    """
+    إذا ما عندك مفاتيح AIS لا تكسر التشغيل.
+    """
+    a = os.environ.get("AISSTREAM_API_KEY", "").strip()
+    b = os.environ.get("AIS_BASE_URL", "").strip()
+    c = os.environ.get("AIS_API_KEY", "").strip()
 
-    if not key and not (base and api):
+    if not a and not (b and c):
         return [{
             "section": "ais",
             "title": "ℹ️ AIS غير مفعّل: ضع AISSTREAM_API_KEY أو AIS_BASE_URL + AIS_API_KEY."
         }]
 
-    # لاحقاً نضيف الاستعلام الحقيقي
+    # هنا مكان ربط مزود AIS لاحقاً
     return []
