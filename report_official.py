@@ -12,8 +12,18 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# ===== Smart Alert Settings (يمكن تغييرها من Secrets/Vars) =====
+ALERT_PM10 = int(os.environ.get("ALERT_PM10", "2000"))              # حد التنبيه الفوري
+ALERT_PM10_CLEAR = int(os.environ.get("ALERT_PM10_CLEAR", "1500"))  # حد “زوال الخطر” (هسترة لمنع التذبذب)
+ALERT_COOLDOWN_MIN = int(os.environ.get("ALERT_COOLDOWN_MIN", "120"))  # كم دقيقة قبل إعادة نفس التنبيه
+
+# =============================================================
+
 def _now_ksa():
     return datetime.datetime.now(tz=KSA_TZ)
+
+def _now_utc():
+    return datetime.datetime.now(tz=datetime.timezone.utc)
 
 def _load_state():
     try:
@@ -48,7 +58,7 @@ def _group_events(events):
         "fires": [],
         "ukmto": [],
         "ais": [],
-        "pm10_list": [],   # ✅ جديد
+        "pm10_list": [],
         "ops_note": [],
         "other": []
     }
@@ -67,6 +77,7 @@ def _lines_from_titles(items, limit=12):
             out.append(f"- {t.strip()}")
     return out if out else ["- لا يوجد"]
 
+# ✅ استخراج أرقام يدعم 3,255 و 3٬255 و 3 255 و 3255
 _NUM_RE = re.compile(r"(\d[\d\s,.\u00A0\u2009\u202F\u066B\u066C]*\d|\d)")
 
 def _parse_best_int(text: str):
@@ -78,8 +89,8 @@ def _parse_best_int(text: str):
         cleaned = (
             m.replace(",", "")
              .replace(".", "")
-             .replace("\u066C", "")
-             .replace("\u066B", "")
+             .replace("\u066C", "")  # ٬
+             .replace("\u066B", "")  # ٫
              .replace("\u00A0", "")
              .replace("\u2009", "")
              .replace("\u202F", "")
@@ -93,6 +104,7 @@ def _parse_best_int(text: str):
     return max(nums) if nums else None
 
 def _extract_top_dust(dust_items):
+    # returns (value, title)
     best = None
     for e in dust_items:
         t = e.get("title", "")
@@ -163,27 +175,112 @@ def _risk_level(score: int):
     return "🟢 منخفض"
 
 def _pick_highlight(grouped):
-    # ✅ 1) لو GDACS يذكر السعودية -> خذه
+    # لو GDACS يذكر السعودية -> GDACS
     for e in grouped["gdacs"]:
         t = e.get("title") or ""
         if ("Saudi" in t) or ("السعودية" in t) or ("KSA" in t):
             return t
 
-    # ✅ 2) لو عندنا غبار مرتفع داخل المملكة -> خذه
+    # لو لا -> أعلى غبار داخل المملكة
     top = _extract_top_dust(grouped["dust"])
     if top:
         return top[1]
 
-    # ✅ 3) لو لا يوجد مؤشرات داخل المملكة لكن فيه GDACS -> خله أبرز حدث كتوعية
+    # لو لا يوجد داخل المملكة لكن GDACS موجود -> خذه كتوعية
     if grouped["gdacs"]:
         return grouped["gdacs"][0].get("title") or "لا يوجد"
 
-    # ✅ 4) باقي المصادر
     for k in ["fires", "ukmto", "ais"]:
         if grouped[k]:
             return grouped[k][0].get("title") or "لا يوجد"
 
     return "لا يوجد"
+
+# ===================== SMART ALERT MODE =====================
+
+def _minutes_since(ts_iso: str):
+    if not ts_iso:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(ts_iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        delta = _now_utc() - dt.astimezone(datetime.timezone.utc)
+        return int(delta.total_seconds() // 60)
+    except Exception:
+        return None
+
+def _smart_alert_dust(grouped, state):
+    """
+    Sends a smart alert when PM10 >= ALERT_PM10 (enter), and a clear alert when below ALERT_PM10_CLEAR (exit).
+    Anti-spam using cooldown minutes.
+    """
+    top = _extract_top_dust(grouped["dust"])  # only contains >=300 typically (or >= high)
+    # لكن في نظامك: dust events تُضاف فقط إذا مرتفع/شديد. ممتاز.
+    # نحتاج القيمة الأعلى + العنوان
+    max_val = top[0] if top else None
+    max_title = top[1] if top else None
+
+    prev_status = state.get("dust_alert_status", "normal")  # "normal" | "severe"
+    last_sent_iso = state.get("dust_alert_last_sent_iso", "")
+    mins = _minutes_since(last_sent_iso)
+
+    def cooldown_ok():
+        return (mins is None) or (mins >= ALERT_COOLDOWN_MIN)
+
+    now_ksa = _now_ksa()
+    stamp = now_ksa.strftime("%Y-%m-%d %H:%M")
+
+    # Enter severe
+    if max_val is not None and max_val >= ALERT_PM10:
+        if prev_status != "severe" or cooldown_ok():
+            msg = (
+                "🚨 تنبيه فوري — غبار شديد جداً (PM10)\n"
+                f"🕒 {stamp} (توقيت السعودية)\n\n"
+                f"📍 الأعلى حالياً:\n{max_title}\n\n"
+                f"📌 معيار التنبيه: PM10 ≥ {ALERT_PM10} µg/m³\n"
+                "✅ المصدر: الرصد الآلي"
+            )
+            _tg_send(msg)
+            state["dust_alert_status"] = "severe"
+            state["dust_alert_last_sent_iso"] = _now_utc().isoformat()
+            state["dust_alert_last_value"] = int(max_val)
+            state["dust_alert_last_title"] = max_title
+            _save_state(state)
+            return True
+
+    # Exit severe (clear) — only if previously severe
+    if prev_status == "severe":
+        # إذا لا يوجد غبار مرتفع الآن، أو أقل من حد clear
+        if (max_val is None) or (max_val < ALERT_PM10_CLEAR):
+            if cooldown_ok():
+                last_title = state.get("dust_alert_last_title", "")
+                last_value = state.get("dust_alert_last_value", "")
+                msg = (
+                    "✅ إشعار — تحسن حالة الغبار الشديد (PM10)\n"
+                    f"🕒 {stamp} (توقيت السعودية)\n\n"
+                    f"📍 آخر حالة كانت:\n{last_title}\n"
+                    f"📉 القيمة السابقة: {last_value} µg/m³\n\n"
+                    f"📌 معيار الإنهاء: PM10 < {ALERT_PM10_CLEAR} µg/m³\n"
+                    "✅ المصدر: الرصد الآلي"
+                )
+                _tg_send(msg)
+                state["dust_alert_status"] = "normal"
+                state["dust_alert_last_sent_iso"] = _now_utc().isoformat()
+                _save_state(state)
+                return True
+
+    return False
+
+def run_smart_alerts(events: list):
+    """
+    Call this once per run. It will send smart alerts (if any) and update state.
+    """
+    grouped = _group_events(events)
+    state = _load_state()
+    _smart_alert_dust(grouped, state)
+
+# ===================== REPORT BUILDER =====================
 
 def build_report_text(title: str, events: list):
     grouped = _group_events(events)
@@ -255,7 +352,6 @@ def build_report_text(title: str, events: list):
     txt.append("6️⃣ حركة السفن وازدحام الموانئ (AIS)\n")
     txt.extend(_lines_from_titles(grouped["ais"], limit=10))
 
-    # ✅ قسم PM10: نطبع القائمة التي أتت من mon_dust مهما كانت
     txt.append("\n════════════════════")
     txt.append("7️⃣ مؤشرات الغبار وجودة الهواء (PM10)\n")
     pm10_lines = []
@@ -278,6 +374,10 @@ def build_report_text(title: str, events: list):
     return "\n".join(txt)
 
 def run(title: str, events: list, only_if_new: bool = False):
+    # ✅ 1) Smart alerts first (فوري)
+    run_smart_alerts(events)
+
+    # ✅ 2) then normal report
     text = build_report_text(title=title, events=events)
 
     if only_if_new:
