@@ -3,7 +3,7 @@ name: Dust Report
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 * * * *"   # كل ساعة (بعد CCC بنص ساعة)
+    - cron: "30 * * * *"
 
 jobs:
   run:
