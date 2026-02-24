@@ -4,12 +4,33 @@ import json
 import hashlib
 import datetime
 import requests
+import html
 
 STATE_FILE = "mewa_state.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# الدول المجاورة/ذات الأولوية (تعديلها إذا تبغى)
+NEARBY_KEYWORDS = [
+    "Saudi", "Saudi Arabia", "KSA", "Kingdom of Saudi Arabia", "المملكة", "السعودية",
+    "UAE", "United Arab Emirates", "الإمارات",
+    "Qatar", "قطر",
+    "Bahrain", "البحرين",
+    "Kuwait", "الكويت",
+    "Oman", "عمان",
+    "Yemen", "اليمن",
+    "Jordan", "الأردن",
+    "Iraq", "العراق",
+    "Syria", "سوريا",
+    "Iran", "إيران",
+    "Türkiye", "Turkey", "تركيا",
+    "Lebanon", "لبنان",
+    "Palestine", "فلسطين",
+    "Gulf", "الخليج",
+    "Red Sea", "البحر الأحمر"
+]
 
 
 # ======================
@@ -38,12 +59,16 @@ def _sha(txt):
 
 
 def _tg_send(text):
+    if not BOT or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    requests.post(url, json={
+    r = requests.post(url, json={
         "chat_id": CHAT_ID,
         "text": text,
         "disable_web_page_preview": True
     }, timeout=40)
+    r.raise_for_status()
 
 
 # ======================
@@ -75,76 +100,132 @@ def _group(events):
 
 def _lines(items, limit=10):
     out = []
-
     for e in (items or [])[:limit]:
         t = str(e.get("title", "")).strip()
-
         if not t:
             continue
-
-        # منع - - لا يوجد
-        t = t.lstrip("- ").strip()
-
+        t = t.lstrip("- ").strip()  # يمنع - - لا يوجد
         out.append(f"- {t}")
-
     return out if out else ["- لا يوجد"]
 
 
 # ======================
-# GDACS ARABIC
+# GDACS: filter + Arabic + cleanup
 # ======================
 
-def _translate_gdacs(line):
+def _gdacs_is_nearby(line: str) -> bool:
+    s = (line or "").lower()
+    for kw in NEARBY_KEYWORDS:
+        if kw.lower() in s:
+            return True
+    return False
 
+
+def _translate_gdacs(line: str) -> str:
+    # فك HTML مثل &amp;
+    line = html.unescape(line or "")
+
+    # تعريب + تحسينات
     repl = {
         "earthquake": "زلزال",
+        "flood alert": "تنبيه فيضانات",
         "flood": "فيضانات",
         "drought": "جفاف",
         "storm": "عاصفة",
+
+        "Magnitude": "القوة",
+        "Depth": "العمق",
+        "km": "كم",
+
+        "Few people affected": "تأثير محدود على السكان",
+        "people affected": "متأثرون",
+        "in MMI": "ضمن مؤشر شدة الاهتزاز (MMI)",
+
         "Green": "🟢 منخفض",
         "Orange": "🟠 متوسط",
-        "Red": "🔴 مرتفع"
+        "Red": "🔴 مرتفع",
+
+        " in ": " في ",
+        " alert in ": " في ",
+        " South Of ": " جنوب ",
+        " Islands": " الجزر",
+        "United States": "الولايات المتحدة",
+        "Democratic Republic of Congo": "جمهورية الكونغو الديمقراطية",
+        "Chile": "تشيلي",
+        "Indonesia": "إندونيسيا",
+        "Philippines": "الفلبين",
+        "Russia": "روسيا",
     }
 
     for k, v in repl.items():
         line = line.replace(k, v)
 
-    return line
+    return line.strip()
+
+
+def _gdacs_lines_filtered(items, limit=8):
+    # نفلتر أولاً بناءً على القرب (السعودية + جوارها)
+    filtered = []
+    for e in (items or []):
+        t = str(e.get("title", "")).strip()
+        if not t:
+            continue
+        t = t.lstrip("- ").strip()
+        if _gdacs_is_nearby(t):
+            filtered.append({"title": t})
+
+    # إذا ما فيه شيء ضمن النطاق: "لا يوجد"
+    if not filtered:
+        return ["- لا يوجد"]
+
+    # نرجع خطوط مترجمة ونظيفة
+    out = []
+    for line in _lines(filtered, limit=limit):
+        # line أصلاً يبدأ بـ "- "
+        core = line[2:].strip()
+        core = _translate_gdacs(core)
+        out.append(f"- {core}")
+    return out
 
 
 # ======================
-# RISK SCORE (مخفف)
+# RISK SCORE
 # ======================
 
 def _risk(grouped):
-
     fires = grouped["fires"]
     gdacs = grouped["gdacs"]
 
     score = 0
     explain = []
 
+    # الحرائق
     if fires:
-        meta = fires[0].get("meta", {})
+        meta = fires[0].get("meta", {}) or {}
         count = int(meta.get("count", 0))
         frp = float(meta.get("top_frp", 0))
 
-        if count >= 200:
-            score += 50
+        # تبسيط منطقي: عدد كبير = مرتفع، متوسط = مراقبة
+        if count >= 200 or frp >= 80:
+            score += 55
             explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (تأثير مرتفع).")
-        elif count >= 50:
-            score += 35
-            explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (للاطلاع).")
+        elif count >= 50 or frp >= 40:
+            score += 40
+            explain.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (تأثير متوسط).")
         else:
             score += 20
-            explain.append("• العامل الرئيسي: مؤشرات حرائق بسيطة داخل المملكة.")
-
+            explain.append("• العامل الرئيسي: مؤشرات حرائق محدودة داخل المملكة (تأثير منخفض).")
     else:
         explain.append("• العامل الرئيسي: لا توجد مؤشرات داخل المملكة حالياً.")
 
-    if gdacs:
-        explain.append("• GDACS: حدث إقليمي للتوعية.")
+    # GDACS (بعد الفلترة)
+    gdacs_near = any(_gdacs_is_nearby(str(e.get("title", ""))) for e in (gdacs or []))
+    if gdacs_near:
+        explain.append("• GDACS: حدث ضمن النطاق (للتوعية).")
         score += 5
+    else:
+        # لا نضيف سكور لو GDACS بعيد
+        pass
 
     return min(score, 100), explain
 
@@ -164,21 +245,25 @@ def _risk_level(score):
 # ======================
 
 def _build(title, grouped, include_ais=True):
-
     now = _now()
     report_id = now.strftime("RPT-%Y%m%d-%H%M%S")
 
     score, explain = _risk(grouped)
     level = _risk_level(score)
 
+    # أبرز حدث: أولاً حرائق داخل المملكة، ثم GDACS (ضمن النطاق فقط)
     top = "لا يوجد"
     if grouped["fires"]:
-        top = grouped["fires"][0]["title"]
-    elif grouped["gdacs"]:
-        top = grouped["gdacs"][0]["title"]
+        top = grouped["fires"][0].get("title", "لا يوجد")
+    else:
+        # اختار أول GDACS قريب
+        for e in grouped["gdacs"]:
+            t = str(e.get("title", "")).strip()
+            if t and _gdacs_is_nearby(t):
+                top = _translate_gdacs(t)
+                break
 
     text = []
-
     text.append(title)
     text.append(f"رقم التقرير: {report_id}")
     text.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
@@ -208,9 +293,7 @@ def _build(title, grouped, include_ais=True):
     text.append("")
     text.append("════════════════════")
     text.append("3️⃣ الكوارث الطبيعية")
-
-    gd = [_translate_gdacs(x) for x in _lines(grouped["gdacs"])]
-    text.extend(gd)
+    text.extend(_gdacs_lines_filtered(grouped["gdacs"], limit=8))
 
     text.append("")
     text.append("════════════════════")
@@ -237,16 +320,14 @@ def _build(title, grouped, include_ais=True):
 
 
 # ======================
-# RUN (متوافق مع كل نسخ main.py)
+# RUN
 # ======================
 
 def run(events=None, report_title="📄 تقرير الرصد والتحديث التشغيلي",
         only_if_new=False, include_ais=True):
 
     events = events or []
-
     grouped = _group(events)
-
     report = _build(report_title, grouped, include_ais)
 
     state = _load_state()
