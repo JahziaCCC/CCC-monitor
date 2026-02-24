@@ -11,10 +11,8 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-
 def _now_ksa():
     return datetime.datetime.now(tz=KSA_TZ)
-
 
 def _load_state():
     try:
@@ -23,27 +21,24 @@ def _load_state():
     except Exception:
         return {}
 
-
 def _save_state(state: dict):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-
 def _tg_send(text: str):
     if not BOT or not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+        # لو تبي تمنع الكراش وقت التجربة
+        return
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
     r = requests.post(url, json={
         "chat_id": CHAT_ID,
         "text": text,
         "disable_web_page_preview": True
-    }, timeout=45)
+    }, timeout=30)
     r.raise_for_status()
-
 
 def _group_events(events):
     grouped = {
@@ -61,55 +56,33 @@ def _group_events(events):
         grouped[sec].append(e)
     return grouped
 
-
-def _lines_from_titles(items, limit=12):
+def _lines(items, limit=12):
     out = []
-    for e in items[:limit]:
-        t = e.get("title") or ""
-        if t.strip():
-            out.append(f"- {t.strip()}")
+    for e in (items or [])[:limit]:
+        t = (e.get("title") or "").strip()
+        if t:
+            out.append(f"- {t}")
     return out if out else ["- لا يوجد"]
 
-
-def _pick_top_event(grouped):
-    # أولوية: حرائق ثم GDACS ثم AIS ثم UKMTO ثم Food
-    for k in ["fires", "gdacs", "ais", "ukmto", "food", "other"]:
-        if grouped.get(k):
-            t = grouped[k][0].get("title")
-            if t:
-                return t.strip()
-    return "لا يوجد"
-
-
 def _risk_score(grouped):
-    """
-    سكور بسيط: حرائق تعطي وزن أعلى، GDACS متوسط، AIS متوسط.
-    """
+    # منطق مبسط: ارفع المخاطر حسب الحرائق
+    fires = grouped.get("fires", [])
     score = 0
 
-    # Fires
-    if grouped["fires"]:
-        score += 40
-    # GDACS
-    if grouped["gdacs"]:
-        score += 15
-    # AIS
-    if grouped["ais"]:
-        # إذا في ازدحام عالي (أرقام كبيرة) نرفع
-        score += 10
-    # UKMTO
-    if grouped["ukmto"]:
-        score += 10
-    # Food
-    if grouped["food"]:
+    # لو فيه عنوان ملخص حرائق يبدأ بـ 🔥 اعتبره مؤشر
+    has_fire = any((e.get("title","").startswith("🔥")) for e in fires)
+    if has_fire:
+        score += 55
+    else:
+        score += 0
+
+    # GDACS إذا فيه رسالة فقط ما يرفع كثير
+    if grouped.get("gdacs"):
         score += 5
 
-    if score > 100:
-        score = 100
-    return score
+    return max(0, min(100, score))
 
-
-def _risk_label(score):
+def _risk_level(score):
     if score >= 80:
         return "🔴 حرج"
     if score >= 60:
@@ -118,82 +91,85 @@ def _risk_label(score):
         return "🟡 مراقبة"
     return "🟢 منخفض"
 
+def _build_report_text(report_no, ts_utc, grouped):
+    score = _risk_score(grouped)
+    level = _risk_level(score)
 
-def run(events, report_title="📄 تقرير الرصد والتحديث التشغيلي", only_if_new=True):
+    # أبرز حدث
+    highlight = "لا يوجد"
+    if grouped["fires"]:
+        # أول سطر حرائق غالباً هو الملخص
+        highlight = (grouped["fires"][0].get("title") or "لا يوجد")
+
+    text = []
+    text.append("📄 تقرير الرصد والتحديث التشغيلي")
+    text.append(f"رقم التقرير: {report_no}")
+    text.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
+    text.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
+    text.append("")
+    text.append("نطاق الرصد: المملكة والدول المجاورة")
+    text.append(f"🕒 تاريخ ووقت التحديث: {ts_utc} UTC")
+    text.append("⏱️ آلية التحديث: تلقائي")
+    text.append("")
+    text.append("════════════════════")
+    text.append("1️⃣ الملخص التنفيذي")
+    text.append("")
+    text.append(f"📊 مؤشر المخاطر الموحد: {score}/100")
+    text.append(f"📌 مستوى المخاطر: {level}")
+    text.append("")
+    text.append("📍 أبرز حدث خلال آخر 6 ساعات:")
+    text.append(f"{highlight}")
+    text.append("")
+    text.append("🧾 تفسير تشغيلي:")
+    if grouped["fires"]:
+        text.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (تأثير متوسط).")
+    else:
+        text.append("• العامل الرئيسي: لا توجد مؤشرات داخل المملكة حالياً.")
+    if grouped["gdacs"]:
+        text.append("• GDACS: حدث/أحداث ضمن النطاق (للتوعية).")
+    text.append("")
+    text.append("════════════════════")
+    text.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
+    text.extend(_lines(grouped["food"]))
+    text.append("")
+    text.append("════════════════════")
+    text.append("3️⃣ الكوارث الطبيعية")
+    text.extend(_lines(grouped["gdacs"]))
+    text.append("")
+    text.append("════════════════════")
+    text.append("4️⃣ حرائق الغابات")
+    text.extend(_lines(grouped["fires"], limit=20))
+    text.append("")
+    text.append("════════════════════")
+    text.append("5️⃣ الأحداث والتحذيرات البحرية")
+    text.extend(_lines(grouped["ukmto"]))
+    text.append("")
+    text.append("════════════════════")
+    text.append("6️⃣ حركة السفن وازدحام الموانئ")
+    text.extend(_lines(grouped["ais"]))
+    text.append("")
+    text.append("════════════════════")
+    text.append("7️⃣ ملاحظات تشغيلية")
+    text.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
+    text.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
+
+    return "\n".join(text)
+
+def run(events):
     now = _now_ksa()
-    rid = now.strftime("RPT-%Y%m%d-%H%M%S")
+    ts_utc = now.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+    report_no = f"RPT-{now.astimezone(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     grouped = _group_events(events)
 
-    score = _risk_score(grouped)
-    level = _risk_label(score)
+    report_text = _build_report_text(report_no, ts_utc, grouped)
 
-    top = _pick_top_event(grouped)
+    # منع تكرار نفس التقرير
+    state = _load_state()
+    h = _sha(report_text)
+    if state.get("last_hash") == h:
+        return report_text
 
-    # تفسير تشغيلي بسيط
-    expl = []
-    if grouped["fires"]:
-        expl.append("• العامل الرئيسي: مؤشرات حرائق/نقاط رصد نشطة داخل المملكة (تأثير متوسط).")
-    if grouped["gdacs"]:
-        expl.append("• GDACS: حدث/أحداث ضمن النطاق (للتوعية).")
-    if not expl:
-        expl.append("• العامل الرئيسي: لا توجد مؤشرات داخل المملكة حالياً.")
-
-    lines = []
-    lines.append(report_title)
-    lines.append(f"رقم التقرير: {rid}")
-    lines.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
-    lines.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
-    lines.append("")
-    lines.append("نطاق الرصد: المملكة والدول المجاورة")
-    lines.append(f"🕒 تاريخ ووقت التحديث: {now.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    lines.append("⏱️ آلية التحديث: تلقائي")
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("1️⃣ الملخص التنفيذي")
-    lines.append("")
-    lines.append(f"📊 مؤشر المخاطر الموحد: {score}/100")
-    lines.append(f"📌 مستوى المخاطر: {level}")
-    lines.append("")
-    lines.append("📍 أبرز حدث خلال آخر 6 ساعات:")
-    lines.append(top)
-    lines.append("")
-    lines.append("🧾 تفسير تشغيلي:")
-    lines.extend(expl)
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("2️⃣ مؤشرات سلاسل الإمداد الغذائي")
-    lines.extend(_lines_from_titles(grouped["food"]))
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("3️⃣ الكوارث الطبيعية")
-    lines.extend(_lines_from_titles(grouped["gdacs"]))
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("4️⃣ حرائق الغابات")
-    lines.extend(_lines_from_titles(grouped["fires"], limit=8))
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("5️⃣ الأحداث والتحذيرات البحرية")
-    lines.extend(_lines_from_titles(grouped["ukmto"]))
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("6️⃣ حركة السفن وازدحام الموانئ")
-    lines.extend(_lines_from_titles(grouped["ais"]))
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("7️⃣ ملاحظات تشغيلية")
-    lines.append("• تم إعداد التقرير آليًا بناءً على مصادر الرصد المعتمدة.")
-    lines.append("• يتم إصدار تنبيه إضافي عند ظهور أحداث جديدة مؤثرة.")
-
-    text = "\n".join(lines)
-
-    st = _load_state()
-    h = _sha(text)
-    if only_if_new and st.get("last") == h:
-        print("no changes")
-        return text
-
-    _tg_send(text)
-    st["last"] = h
-    _save_state(st)
-    return text
+    _tg_send(report_text)
+    state["last_hash"] = h
+    _save_state(state)
+    return report_text
