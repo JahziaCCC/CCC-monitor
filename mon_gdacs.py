@@ -1,68 +1,41 @@
-import hashlib
+# mon_gdacs.py
 import requests
-from datetime import datetime, timedelta, timezone
 
-# BBOX: السعودية + الجوار + البحر الأحمر/الخليج (قابل للتعديل)
-BBOX = {"min_lat": 10.0, "max_lat": 38.0, "min_lon": 32.0, "max_lon": 61.0}
+KSA_KEYWORDS = ["Saudi", "Kingdom of Saudi", "Saudi Arabia", "KSA", "السعودية", "المملكة"]
 
-def _fp(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:24]
-
-def _in_bbox(lat, lon):
-    return (BBOX["min_lat"] <= lat <= BBOX["max_lat"]) and (BBOX["min_lon"] <= lon <= BBOX["max_lon"])
+def _ksa_related(text: str) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in KSA_KEYWORDS)
 
 def fetch():
-    todate = datetime.now(timezone.utc).date()
-    fromdate = (todate - timedelta(days=7))
-
-    url = (
-        "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
-        f"?eventlist=EQ;FL;TC;VO;DR"
-        f"&fromdate={fromdate.isoformat()}&todate={todate.isoformat()}"
-        f"&alertlevel=red;orange"
-    )
-
-    # ✅ مهم: لا تُسقط التشغيل إذا تأخر GDACS
+    """
+    مصدر بسيط: RSS عام لـ GDACS (قد يختلف حسب ما عندك سابقاً)
+    إذا عندك مصدر آخر سابقاً، خله واستفد فقط من فكرة ksa_related.
+    """
     try:
-        r = requests.get(url, timeout=40)
+        # RSS عام
+        url = "https://www.gdacs.org/xml/rss.xml"
+        r = requests.get(url, timeout=45)
         r.raise_for_status()
-        data = r.json()
+        xml = r.text
+
+        # parsing خفيف بدون مكتبات إضافية: نلتقط titles
+        titles = []
+        for part in xml.split("<item>")[1:6]:
+            if "<title>" in part and "</title>" in part:
+                t = part.split("<title>", 1)[1].split("</title>", 1)[0].strip()
+                titles.append(t)
+
+        if not titles:
+            return [{"section": "gdacs", "title": "- لا يوجد"}]
+
+        out = []
+        for t in titles:
+            out.append({
+                "section": "gdacs",
+                "title": f"- 🌍 {t}",
+                "ksa_related": _ksa_related(t)
+            })
+        return out
     except Exception:
-        return []
-
-    feats = data.get("features", [])
-
-    items = []
-    for f in feats:
-        p = f.get("properties", {}) or {}
-        geom = f.get("geometry", {}) or {}
-        coords = (geom.get("coordinates") or [None, None])
-
-        lon, lat = coords[0], coords[1]
-        if lat is None or lon is None:
-            continue
-
-        if not _in_bbox(lat, lon):
-            continue
-
-        level = (p.get("alertlevel") or "").lower()
-        name = p.get("name") or p.get("title") or "حدث"
-        link = p.get("link") or p.get("url") or "https://new.gdacs.org"
-        eventid = p.get("eventid", "")
-
-        key = _fp(f"gdacs|{eventid}|{level}|{name}")
-
-        items.append({
-            "key": key,
-            "section": "gdacs",
-            "title": f"🌍 GDACS {level.upper()} — {name}",
-            "link": link,
-            "meta": {
-                "lat": lat,
-                "lon": lon,
-                "level": level,
-                "type": p.get("eventtype")
-            }
-        })
-
-    return items
+        return [{"section": "gdacs", "title": "- لا يوجد"}]
