@@ -2,8 +2,8 @@ name: Air Report (PM10)
 
 on:
   schedule:
-    - cron: "0 */3 * * *"   # كل 3 ساعات
-  workflow_dispatch:
+    - cron: "0 */3 * * *"   # كل 3 ساعات (عدله براحتك)
+  workflow_dispatch: {}
 
 jobs:
   air_report:
@@ -28,3 +28,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python report_air.py
+
+      - name: Persist state
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add air_state.json || true
+          git commit -m "chore: update air state" || echo "No changes"
+          git push || echo "No push"
