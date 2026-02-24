@@ -1,39 +1,90 @@
 # main.py
-import os
+# =========================================
+# CCC Monitor - Main Runner
+# =========================================
 
-import report_official
+import datetime
+
+# ====== IMPORT MONITORS ======
 import mon_gdacs
-import mon_fires
 import mon_ukmto
 import mon_ais
+import mon_fires
 import risk_food
 
-def collect_events(include_ais: bool = True):
+import report_official
+
+
+# =========================================
+# تجميع جميع الأحداث
+# =========================================
+def collect_events():
+
     events = []
-    events.extend(risk_food.fetch())
-    events.extend(mon_gdacs.fetch())
-    events.extend(mon_fires.fetch())
-    events.extend(mon_ukmto.fetch())
-    if include_ais:
-        events.extend(mon_ais.fetch())
+
+    # ---------- GDACS ----------
+    try:
+        events += mon_gdacs.fetch_events()
+    except Exception as e:
+        events.append({
+            "section": "gdacs",
+            "title": f"⚠️ خطأ GDACS: {e}"
+        })
+
+    # ---------- FIRMS (حرائق) ----------
+    try:
+        events += mon_fires.fetch_events()
+    except Exception as e:
+        events.append({
+            "section": "fires",
+            "title": f"⚠️ خطأ FIRMS: {e}"
+        })
+
+    # ---------- UKMTO ----------
+    try:
+        events += mon_ukmto.fetch_events()
+    except Exception as e:
+        events.append({
+            "section": "ukmto",
+            "title": f"⚠️ خطأ UKMTO: {e}"
+        })
+
+    # ---------- AIS ----------
+    try:
+        events += mon_ais.fetch_events()
+    except Exception as e:
+        events.append({
+            "section": "ais",
+            "title": f"⚠️ خطأ AIS: {e}"
+        })
+
+    # ---------- Food Supply ----------
+    try:
+        events += risk_food.fetch_events()
+    except Exception as e:
+        events.append({
+            "section": "food",
+            "title": f"⚠️ خطأ Food Risk: {e}"
+        })
+
     return events
 
-def run_report(report_title: str, only_if_new: bool = False, include_ais: bool = True):
-    events = collect_events(include_ais=include_ais)
-    return report_official.run(
-        report_title,
-        events=events,
-        only_if_new=only_if_new,
-        include_ais=include_ais
-    )
 
+# =========================================
+# MAIN RUN
+# =========================================
 def main():
-    # defaults
-    report_title = os.environ.get("REPORT_TITLE", "📌 تقرير مجدول")
-    only_if_new = os.environ.get("ONLY_IF_NEW", "0") == "1"
-    include_ais = os.environ.get("INCLUDE_AIS", "1") == "1"
 
-    run_report(report_title, only_if_new=only_if_new, include_ais=include_ais)
+    print("🚀 CCC Monitor Running...")
 
+    events = collect_events()
+
+    # إرسال التقرير الرسمي
+    report_official.run(events)
+
+    print("✅ Report sent successfully")
+
+
+# =========================================
 if __name__ == "__main__":
     main()
