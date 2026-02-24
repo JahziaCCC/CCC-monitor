@@ -15,7 +15,7 @@ FIRMS_DAYS = int(os.environ.get("FIRMS_DAYS", "1"))  # 1 = آخر 24 ساعة
 
 TOP_N = int(os.environ.get("FIRMS_TOP_N", "5"))
 
-# ✅ افتراضي احترافي لتقليل "Gas flares" الصناعية (خصوصاً الشرقية)
+# افتراضي احترافي لتقليل "Gas flares" الصناعية (خصوصاً الشرقية)
 # تقدر تغيّره من GitHub Variables: ALERT_FIRES_FRP
 MIN_FRP = float(os.environ.get("ALERT_FIRES_FRP", "30"))
 
@@ -145,7 +145,7 @@ def _in_ksa_polygon(lat, lon) -> bool:
     داخل السعودية فعلياً:
     1) فلتر سريع bbox
     2) polygon
-    3) Guards لاستبعاد العراق/إيران/الكويت شمال شرق (سبب التسرب سابقاً)
+    3) Guards لاستبعاد العراق/إيران/الكويت شمال شرق
     """
     # 1) فلتر عام سريع
     if not (16.0 <= lat <= 32.5 and 34.0 <= lon <= 56.0):
@@ -155,16 +155,11 @@ def _in_ksa_polygon(lat, lon) -> bool:
     if not _point_in_polygon(lat, lon, KSA_POLYGON):
         return False
 
-    # 3) Guards (مهم جداً)
-    # يحذف نقاط مثل: 31.03,47.28 و 30.72,49.82
+    # 3) Guards (مهم جداً) — يحذف نقاط مثل 31.03,47.28
     if lat >= 29.2 and lon > 44.5:
         return False
-
-    # استبعاد زاوية الكويت/البصرة تقريبياً
     if lat >= 28.8 and lon > 47.2:
         return False
-
-    # استبعاد أقصى الشرق البحري/الخليج إذا كانت شمالية
     if lat >= 27.8 and lon > 51.5:
         return False
 
@@ -215,8 +210,9 @@ def fetch():
 
     rows = filtered
 
+    # ✅ هنا إصلاح "- - لا يوجد" (نرجّع "لا يوجد" بدون شرطة)
     if not rows:
-        return [{"section": "fires", "title": "- لا يوجد", "meta": {"count": 0}}]
+        return [{"section": "fires", "title": "لا يوجد", "meta": {"count": 0}}]
 
     count = len(rows)
     max_frp = max(x["frp"] for x in rows)
