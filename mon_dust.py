@@ -1,125 +1,148 @@
-# mon_dust.py
+# mon_dusty.py
 import os
+import json
+import hashlib
 import datetime
 import requests
 
+STATE_FILE = "mewa_state_dust.json"
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 
-# Open-Meteo Air Quality API (لا يحتاج مفتاح)
-AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# 17 موقع (مناطق/مدن) — تقدر تزيد وتعدل
-CITIES = {
-    "الرياض": (24.7136, 46.6753),
-    "مكة": (21.3891, 39.8579),
-    "المدينة": (24.5247, 39.5692),
-    "جدة": (21.5433, 39.1728),
-    "المنطقة الشرقية (الدمام)": (26.4207, 50.0888),
-    "القصيم (بريدة)": (26.3592, 43.9818),
-    "عسير (أبها)": (18.2164, 42.5053),
-    "جازان": (16.8892, 42.5706),
-    "نجران": (17.5650, 44.2289),
-    "الباحة": (20.0129, 41.4677),
-    "تبوك": (28.3998, 36.5715),
-    "الجوف (سكاكا)": (29.9697, 40.2064),
-    "حائل": (27.5114, 41.7208),
-    "الحدود الشمالية (عرعر)": (30.9753, 41.0381),
-    "القريات": (31.3317, 37.3428),
-    "العلا": (26.6085, 37.9232),
-    "نيوم": (27.9678, 35.2137),
-}
+# Open-Meteo Air Quality API (مجاني)
+AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-def _now_utc_iso():
-    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+# قائمة مناطق/مدن المملكة (17 موقع – اللي عندك سابقاً)
+LOCATIONS = [
+    ("الرياض", 24.7136, 46.6753),
+    ("مكة", 21.3891, 39.8579),
+    ("المدينة", 24.5247, 39.5692),
+    ("جدة", 21.4858, 39.1925),
+    ("المنطقة الشرقية (الدمام)", 26.4207, 50.0888),
+    ("القصيم (بريدة)", 26.3592, 43.9818),
+    ("عسير (أبها)", 18.2164, 42.5053),
+    ("جازان", 16.8892, 42.5706),
+    ("نجران", 17.5650, 44.2289),
+    ("الباحة", 20.0129, 41.4677),
+    ("تبوك", 28.3838, 36.5662),
+    ("الجوف (سكاكا)", 29.9697, 40.2064),
+    ("حائل", 27.5114, 41.7208),
+    ("الحدود الشمالية (عرعر)", 30.9753, 41.0381),
+    ("القريات", 31.3316, 37.3428),
+    ("العلا", 26.6085, 37.9232),
+    ("نيوم", 29.0, 35.0),
+]
 
-def _classify(pm10_value: float) -> str:
-    # تصنيف بسيط (تقدر تعدله)
-    # طبيعي <= 250 ، مرتفع 251-600 ، شديد جدًا > 600
-    if pm10_value is None:
+def _now():
+    return datetime.datetime.now(tz=KSA_TZ)
+
+def _sha(txt):
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+def _load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def _tg_send(text):
+    if not BOT or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+    url = f"https://api.telegram.org/bot{BOT}/sendMessage"
+    r = requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True
+    }, timeout=45)
+    r.raise_for_status()
+
+def _pm10_status(pm10):
+    # حدود تقريبية تشغيلية (تقدر تعدلها)
+    if pm10 is None:
         return "غير متاح مؤقتاً"
-    if pm10_value <= 250:
-        return f"✅ غبار ضمن الطبيعي — {pm10_value:.0f} µg/m³"
-    if pm10_value <= 600:
-        return f"🌪️ مؤشر غبار مرتفع — {pm10_value:.0f} µg/m³"
-    return f"⚠️ غبار شديد جدًا — {pm10_value:.0f} µg/m³"
+    if pm10 >= 2000:
+        return f"⚠️ غبار شديد جدًا — {pm10:.0f} µg/m³"
+    if pm10 >= 400:
+        return f"🌪️ مؤشر غبار مرتفع — {pm10:.0f} µg/m³"
+    return f"✅ غبار ضمن الطبيعي — {pm10:.0f} µg/m³"
 
-def fetch(timeout=25):
-    """
-    يرجع قائمة Events بصيغة المشروع:
-    section='dust'
-    title جاهز للعرض في التقرير
-    meta فيها التفاصيل
-    """
-    events = []
+def fetch_pm10(lat, lon, timeout=25):
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "pm10",
+        "timezone": "UTC"
+    }
+    r = requests.get(AQ_URL, params=params, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    vals = (data.get("hourly") or {}).get("pm10") or []
+    if not vals:
+        return None
+    # آخر قراءة
+    return vals[-1]
+
+def build_report(lines, notes):
+    now = _now()
+    rid = now.strftime("RPT-DUST-%Y%m%d-%H%M%S")
+    out = []
+    out.append("🌪️ تقرير الغبار وجودة الهواء (PM10)")
+    out.append(f"رقم التقرير: {rid}")
+    out.append("الجهة المصدرة: نظام الرصد الآلي – مركز المتابعة")
+    out.append("تصنيف التقرير: تشغيلي – للاستخدام الداخلي")
+    out.append("")
+    out.append(f"🕒 تاريخ ووقت التحديث: {now.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    out.append("⏱️ آلية التحديث: تلقائي")
+    out.append("")
+    out.append("════════════════════")
+    out.append("1️⃣ قراءات PM10 (المملكة)")
+    out.extend(lines if lines else ["- لا يوجد"])
+    out.append("")
+    out.append("════════════════════")
+    out.append("2️⃣ ملاحظات")
+    if notes:
+        for n in notes:
+            out.append(f"• {n}")
+    else:
+        out.append("• لا يوجد")
+    return "\n".join(out)
+
+def run(only_if_new=True):
+    lines = []
+    notes = []
+
     failed = 0
-
-    for name, (lat, lon) in CITIES.items():
+    for name, lat, lon in LOCATIONS:
         try:
-            params = {
-                "latitude": lat,
-                "longitude": lon,
-                "hourly": "pm10",
-                "timezone": "UTC",
-                "past_days": 0,
-            }
-            r = requests.get(AIR_URL, params=params, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-
-            hourly = (data.get("hourly") or {})
-            times = hourly.get("time") or []
-            pm10s = hourly.get("pm10") or []
-
-            pm10_value = None
-            if times and pm10s:
-                pm10_value = pm10s[-1]
-
-            if pm10_value is None:
-                failed += 1
-                line = f"- {name}: غير متاح مؤقتاً"
+            pm10 = fetch_pm10(lat, lon)
+            status = _pm10_status(pm10)
+            if "غير متاح" in status:
+                lines.append(f"- {name}: غير متاح مؤقتاً")
             else:
-                line = f"- {name}: {_classify(float(pm10_value))}".replace("—", "— " + name + ": ", 1)
-                # النتيجة فوق تطلع مزدوجة، نخليها بسيطة:
-                # "- الرياض: ⚠️ غبار شديد جدًا — 2652 µg/m³"
-                # نبنيها يدويًا:
-                cls = _classify(float(pm10_value))
-                if cls == "غير متاح مؤقتاً":
-                    line = f"- {name}: غير متاح مؤقتاً"
-                else:
-                    # cls: "⚠️ غبار شديد جدًا — 2652 µg/m³"
-                    line = f"- {name}: {cls}"
-
-            events.append({
-                "section": "dust",
-                "title": line.replace("- ", "").strip(),
-                "meta": {
-                    "city": name,
-                    "pm10": pm10_value,
-                    "lat": lat,
-                    "lon": lon,
-                    "ts": _now_utc_iso()
-                }
-            })
-        except Exception as e:
+                lines.append(f"- {name}: {status}")
+        except Exception:
             failed += 1
-            events.append({
-                "section": "dust",
-                "title": f"{name}: غير متاح مؤقتاً",
-                "meta": {
-                    "city": name,
-                    "error": str(e),
-                    "lat": lat,
-                    "lon": lon,
-                    "ts": _now_utc_iso()
-                }
-            })
+            lines.append(f"- {name}: غير متاح مؤقتاً")
 
-    # إضافة ملاحظة تشغيلية إذا فيه فشل
     if failed:
-        events.append({
-            "section": "other",
-            "title": f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {failed} مواقع (مؤقتاً).",
-            "meta": {"failed": failed, "ts": _now_utc_iso()}
-        })
+        notes.append(f"ℹ️ ملاحظة: تعذر جلب قراءة PM10 لعدد {failed} مواقع (مؤقتاً).")
 
-    return events
+    report = build_report(lines, notes)
+
+    st = _load_state()
+    h = _sha(report)
+    if only_if_new and st.get("last") == h:
+        print("no changes")
+        return report
+
+    _tg_send(report)
+    st["last"] = h
+    _save_state(st)
+    return report
