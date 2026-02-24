@@ -1,90 +1,76 @@
 # main.py
-# =========================================
-# CCC Monitor - Main Runner
-# =========================================
+import sys
 
-import datetime
+import report_official  # التقرير الرئيسي
 
-# ====== IMPORT MONITORS ======
-import mon_gdacs
-import mon_ukmto
-import mon_ais
-import mon_fires
-import risk_food
+def _safe_import(name):
+    try:
+        return __import__(name)
+    except Exception as e:
+        print(f"[WARN] Could not import {name}: {e}")
+        return None
 
-import report_official
-
-
-# =========================================
-# تجميع جميع الأحداث
-# =========================================
-def collect_events():
-
+def _collect_events():
     events = []
 
-    # ---------- GDACS ----------
-    try:
-        events += mon_gdacs.fetch_events()
-    except Exception as e:
-        events.append({
-            "section": "gdacs",
-            "title": f"⚠️ خطأ GDACS: {e}"
-        })
+    # Fires (FIRMS)
+    mon_fires = _safe_import("mon_fires")
+    if mon_fires and hasattr(mon_fires, "collect"):
+        try:
+            events.extend(mon_fires.collect())
+        except Exception as e:
+            print(f"[WARN] mon_fires.collect failed: {e}")
 
-    # ---------- FIRMS (حرائق) ----------
-    try:
-        events += mon_fires.fetch_events()
-    except Exception as e:
-        events.append({
-            "section": "fires",
-            "title": f"⚠️ خطأ FIRMS: {e}"
-        })
+    # UKMTO
+    mon_ukmto = _safe_import("mon_ukmto")
+    if mon_ukmto and hasattr(mon_ukmto, "collect"):
+        try:
+            events.extend(mon_ukmto.collect())
+        except Exception as e:
+            print(f"[WARN] mon_ukmto.collect failed: {e}")
 
-    # ---------- UKMTO ----------
-    try:
-        events += mon_ukmto.fetch_events()
-    except Exception as e:
-        events.append({
-            "section": "ukmto",
-            "title": f"⚠️ خطأ UKMTO: {e}"
-        })
+    # AIS
+    # انت قلت غيرت الاسم إلى mon_ais.py
+    mon_ais = _safe_import("mon_ais")
+    if mon_ais and hasattr(mon_ais, "collect"):
+        try:
+            events.extend(mon_ais.collect())
+        except Exception as e:
+            print(f"[WARN] mon_ais.collect failed: {e}")
 
-    # ---------- AIS ----------
-    try:
-        events += mon_ais.fetch_events()
-    except Exception as e:
-        events.append({
-            "section": "ais",
-            "title": f"⚠️ خطأ AIS: {e}"
-        })
+    # Food supply
+    risk_food = _safe_import("risk_food")
+    if risk_food and hasattr(risk_food, "collect"):
+        try:
+            events.extend(risk_food.collect())
+        except Exception as e:
+            print(f"[WARN] risk_food.collect failed: {e}")
 
-    # ---------- Food Supply ----------
-    try:
-        events += risk_food.fetch_events()
-    except Exception as e:
-        events.append({
-            "section": "food",
-            "title": f"⚠️ خطأ Food Risk: {e}"
-        })
+    # GDACS
+    mon_gdacs = _safe_import("mon_gdacs")
+    if mon_gdacs and hasattr(mon_gdacs, "collect"):
+        try:
+            events.extend(mon_gdacs.collect())
+        except Exception as e:
+            print(f"[WARN] mon_gdacs.collect failed: {e}")
 
     return events
 
-
-# =========================================
-# MAIN RUN
-# =========================================
 def main():
-
     print("🚀 CCC Monitor Running...")
 
-    events = collect_events()
+    events = _collect_events()
 
-    # إرسال التقرير الرسمي
-    report_official.run(events)
+    # تقرير رئيسي بدون غبار (الغبار صار تقرير منفصل)
+    report_official.run(
+        events,
+        report_title="📄 تقرير الرصد والتحديث التشغيلي",
+        include_ais=True
+    )
 
-    print("✅ Report sent successfully")
-
-
-# =========================================
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[FATAL] {e}")
+        sys.exit(1)
