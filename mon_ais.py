@@ -1,11 +1,4 @@
 # mon_ais.py
-"""
-AIS placeholder (جاهز للتوسعة لاحقاً)
-
-يرجع Events بصيغة موحّدة:
-{ "section": "ais", "title": "..." }
-"""
-
-def fetch():
-    # حالياً: لا يوجد
+def collect():
+    # إذا عندك بيانات AIS لاحقاً نربطها
     return [{"section": "ais", "title": "- لا يوجد"}]
