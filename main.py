@@ -1,48 +1,34 @@
 # main.py
-import datetime
+import report_official
 
-# ===== Import monitors =====
-import mon_dust
 import mon_gdacs
 import mon_fires
 import mon_ukmto
-import mon_ais   # ← تأكد الاسم كذا
-
-import report_official
+import mon_ais  # تأكد اسم الملف mon_ais.py
 
 
-# ==========================
-# Collect all events
-# ==========================
 def collect_events(include_ais=True):
-
     events = []
 
-    # ---- Dust / PM10 ----
-    try:
-        events.extend(mon_dust.fetch())
-    except Exception as e:
-        print("[WARN] mon_dust failed:", e)
-
-    # ---- GDACS ----
+    # GDACS
     try:
         events.extend(mon_gdacs.fetch())
     except Exception as e:
         print("[WARN] mon_gdacs failed:", e)
 
-    # ---- FIRMS fires ----
+    # FIRMS
     try:
         events.extend(mon_fires.fetch())
     except Exception as e:
         print("[WARN] mon_fires failed:", e)
 
-    # ---- UKMTO ----
+    # UKMTO
     try:
         events.extend(mon_ukmto.fetch())
     except Exception as e:
         print("[WARN] mon_ukmto failed:", e)
 
-    # ---- AIS ----
+    # AIS
     if include_ais:
         try:
             events.extend(mon_ais.fetch())
@@ -52,19 +38,12 @@ def collect_events(include_ais=True):
     return events
 
 
-# ==========================
-# Main runner
-# ==========================
 def main():
-
     print("=== CCC Monitor starting ===")
 
     events = collect_events(include_ais=True)
-
     print(f"[INFO] Total events collected: {len(events)}")
 
-    # IMPORTANT:
-    # pass events to report_official.run
     report_official.run(
         "📌 تقرير مجدول",
         only_if_new=False,
@@ -75,6 +54,5 @@ def main():
     print("=== CCC Monitor finished ===")
 
 
-# ==========================
 if __name__ == "__main__":
     main()
