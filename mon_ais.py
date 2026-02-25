@@ -1,66 +1,127 @@
 import os
+import json
+import websocket
 import datetime
 import requests
 
-# =========================
-# Telegram
-# =========================
-BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+BOT = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+API_KEY = os.environ["AISSTREAM_API_KEY"]
 
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
 # =========================
-# Dummy counts (replace later with AIS source)
+# مناطق الرصد (تقريبية)
 # =========================
-RED_SEA_SHIPS = 134
-GULF_SHIPS = 98
+RED_SEA = {
+    "minLat": 12,
+    "maxLat": 30,
+    "minLon": 32,
+    "maxLon": 44,
+}
 
-PORTS_RED_SEA = ["ميناء جدة الإسلامي", "ميناء ينبع", "ميناء ضباء", "ميناء نيوم"]
-PORTS_GULF = ["ميناء الملك عبدالعزيز (الدمام)", "ميناء الجبيل التجاري", "رأس تنورة (منطقة نفطية)"]
+GULF = {
+    "minLat": 22,
+    "maxLat": 31,
+    "minLon": 47,
+    "maxLon": 57,
+}
 
-def send_telegram(text: str):
-    if not BOT:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN secret")
-    if not CHAT_ID:
-        raise RuntimeError("Missing TELEGRAM_CHAT_ID secret")
+# =========================
+# Counters
+# =========================
+red_total = 0
+gulf_total = 0
+red_oil = 0
+gulf_oil = 0
 
+def in_box(lat, lon, box):
+    return (
+        box["minLat"] <= lat <= box["maxLat"]
+        and box["minLon"] <= lon <= box["maxLon"]
+    )
+
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=25)
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=20)
+    print(r.text)
 
-    # مهم جدًا للتشخيص في الـ Actions logs
-    print("TELEGRAM STATUS:", r.status_code)
-    print("TELEGRAM RESPONSE:", r.text)
+def on_message(ws, message):
+    global red_total, gulf_total, red_oil, gulf_oil
 
-    r.raise_for_status()
+    data = json.loads(message)
 
-def build_report() -> str:
-    ports_rs = "\n".join([f"• {p}" for p in PORTS_RED_SEA])
-    ports_gf = "\n".join([f"• {p}" for p in PORTS_GULF])
+    try:
+        msg = data["Message"]["PositionReport"]
+        lat = msg["Latitude"]
+        lon = msg["Longitude"]
+        ship_type = msg.get("ShipType", 0)
 
+        # البحر الأحمر
+        if in_box(lat, lon, RED_SEA):
+            red_total += 1
+            if 80 <= ship_type <= 89:
+                red_oil += 1
+
+        # الخليج العربي
+        if in_box(lat, lon, GULF):
+            gulf_total += 1
+            if 80 <= ship_type <= 89:
+                gulf_oil += 1
+
+    except:
+        pass
+
+def build_report():
     return f"""🚢 تقرير الحركة البحرية – البحر الأحمر والخليج العربي
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📊 حركة السفن (تقديري/تشغيلي):
-• البحر الأحمر: {RED_SEA_SHIPS} سفينة
-• الخليج العربي: {GULF_SHIPS} سفينة
+📊 إجمالي السفن:
+• البحر الأحمر: {red_total}
+• الخليج العربي: {gulf_total}
 
-⚓ الموانئ ضمن النطاق:
-🔴 البحر الأحمر:
-{ports_rs}
-
-🟦 الخليج العربي:
-{ports_gf}
+🛢️ ناقلات النفط:
+• البحر الأحمر: {red_oil}
+• الخليج العربي: {gulf_oil}
 
 ════════════════════
 📍 ملاحظات تشغيلية:
-• هذا تقرير تشغيل أولي (Baseline).
-• سيتم إضافة مصدر AIS فعلي + ازدحام الموانئ + تنبيهات ذكية.
+• البيانات مباشرة من AISStream.
+• تحديث كل ساعة.
 """
 
+def run():
+    ws = websocket.WebSocketApp(
+        "wss://stream.aisstream.io/v0/stream",
+        on_message=on_message,
+    )
+
+    sub_msg = {
+        "APIKey": API_KEY,
+        "BoundingBoxes": [[
+            [12, 32],
+            [30, 44]
+        ],[
+            [22, 47],
+            [31, 57]
+        ]]
+    }
+
+    def on_open(ws):
+        ws.send(json.dumps(sub_msg))
+
+    ws.on_open = on_open
+
+    # تشغيل لمدة 60 ثانية فقط (عشان GitHub)
+    ws.run_forever(dispatcher=None, reconnect=0)
+
 if __name__ == "__main__":
-    msg = build_report()
-    send_telegram(msg)
-    print("AIS report sent successfully.")
+    try:
+        run()
+    except:
+        pass
+
+    send_telegram(build_report())
+    print("AIS report sent")
