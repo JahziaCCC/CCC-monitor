@@ -25,10 +25,12 @@ STATE_FILE = "dust_state.json"
 # Settings
 # =========================
 SUMMARY_HOURS = {6, 18}
-DELTA_PM10_ALERT = 80.0  # تقليل التكرار
+DELTA_PM10_ALERT = 80.0   # تقليل تكرار التنبيهات
+API_TIMEOUT_SEC = 20
+API_RETRIES = 2           # عدد المحاولات لكل مدينة
 
 # =========================
-# Locations (Saudi Arabia)
+# Locations (Saudi Arabia + AlUla + NEOM)
 # =========================
 KSA_POINTS: Dict[str, Tuple[float, float]] = {
 
@@ -69,8 +71,11 @@ KSA_POINTS: Dict[str, Tuple[float, float]] = {
 # =========================
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {
         "last_worst_level": None,
         "last_summary_key": None,
@@ -83,9 +88,13 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def send_telegram(text):
+    if not BOT or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text})
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=25)
     print("TELEGRAM:", r.status_code)
+    print("TELEGRAM response:", r.text)
     r.raise_for_status()
 
 def pm10_to_level(v):
@@ -95,64 +104,94 @@ def pm10_to_level(v):
     return "🔴 شديد"
 
 def level_rank(level):
-    return {"🟢 منخفض":0,"🟡 متوسط":1,"🟠 مرتفع":2,"🔴 شديد":3}[level]
+    return {"🟢 منخفض": 0, "🟡 متوسط": 1, "🟠 مرتفع": 2, "🔴 شديد": 3}[level]
 
 def compute_score(v):
-    return int(max(0, min(100, (v/600)*100)))
+    # 600 => 100
+    return int(max(0, min(100, (v / 600.0) * 100)))
 
-def fetch_pm10(lat, lon):
+def fetch_pm10(lat, lon) -> Optional[float]:
+    """
+    Robust fetch:
+    - retries
+    - timeout-safe (no crash)
+    - filters outliers (0 < PM10 < 600)
+    - average of latest 3 values
+    """
     url = (
         "https://air-quality-api.open-meteo.com/v1/air-quality"
         f"?latitude={lat}&longitude={lon}"
         "&hourly=pm10&timezone=Asia%2FRiyadh"
     )
-    r = requests.get(url, timeout=25)
-    data = r.json()
-    pm10s = data.get("hourly", {}).get("pm10", [])
 
-    vals=[]
-    for x in reversed(pm10s):
-        if x and 0 < x < 600:
-            vals.append(float(x))
-        if len(vals)==3:
-            break
+    last_err = None
+    for attempt in range(1, API_RETRIES + 1):
+        try:
+            r = requests.get(url, timeout=API_TIMEOUT_SEC)
+            r.raise_for_status()
+            data = r.json()
+            pm10s = data.get("hourly", {}).get("pm10", [])
 
-    if not vals:
-        return None
+            vals = []
+            for x in reversed(pm10s):
+                if x is None:
+                    continue
+                try:
+                    fx = float(x)
+                except Exception:
+                    continue
+                if 0 < fx < 600:
+                    vals.append(fx)
+                if len(vals) == 3:
+                    break
 
-    return sum(vals)/len(vals)
+            if not vals:
+                return None
+
+            return sum(vals) / len(vals)
+
+        except Exception as e:
+            last_err = e
+            print(f"API attempt {attempt}/{API_RETRIES} failed: {e}")
+
+    print(f"API failed finally: {last_err}")
+    return None
 
 def group_levels(city_values):
-    g={"🔴 شديد":[],"🟠 مرتفع":[],"🟡 متوسط":[],"🟢 منخفض":[]}
-    for c,v in city_values.items():
-        g[pm10_to_level(v)].append((c,v))
+    g = {"🔴 شديد": [], "🟠 مرتفع": [], "🟡 متوسط": [], "🟢 منخفض": []}
+    for c, v in city_values.items():
+        g[pm10_to_level(v)].append((c, v))
     for k in g:
-        g[k].sort(key=lambda x:x[1], reverse=True)
+        g[k].sort(key=lambda x: x[1], reverse=True)
     return g
 
-def format_group(title, items):
+def format_group(title, items, max_lines=10):
     if not items:
         return f"{title}\n- لا يوجد\n"
-    txt=[title]
-    for c,v in items[:10]:
+    txt = [title]
+    for c, v in items[:max_lines]:
         txt.append(f"• {c}: {v:.0f} µg/m³")
-    return "\n".join(txt)+"\n"
+    if len(items) > max_lines:
+        txt.append(f"… +{len(items) - max_lines} مناطق أخرى")
+    return "\n".join(txt) + "\n"
 
 def pin_sites(values):
-    out=[]
-    for n in ["العلا","نيوم"]:
+    out = []
+    for n in ["العلا", "نيوم"]:
         if n in values:
-            v=values[n]
+            v = values[n]
             out.append(f"• {n}: {v:.0f} µg/m³ ({pm10_to_level(v)})")
+        else:
+            out.append(f"• {n}: لا توجد بيانات")
     return "\n".join(out)
 
 # =========================
 # Report builders
 # =========================
-def build_summary(values,worst_city,worst):
-    score=compute_score(worst)
-    lvl=pm10_to_level(worst)
-    g=group_levels(values)
+def build_summary(values, worst_city, worst):
+    score = compute_score(worst)
+    lvl = pm10_to_level(worst)
+    g = group_levels(values)
 
     return f"""🌪️ تقرير الغبار – المملكة العربية السعودية
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
@@ -166,19 +205,20 @@ def build_summary(values,worst_city,worst):
 {pin_sites(values)}
 
 ════════════════════
-{format_group('🔴 شديد:',g['🔴 شديد'])}
-{format_group('🟠 مرتفع:',g['🟠 مرتفع'])}
-{format_group('🟡 متوسط:',g['🟡 متوسط'])}
-{format_group('🟢 منخفض:',g['🟢 منخفض'])}
+{format_group('🔴 شديد:', g['🔴 شديد'])}
+{format_group('🟠 مرتفع:', g['🟠 مرتفع'])}
+{format_group('🟡 متوسط:', g['🟡 متوسط'])}
+{format_group('🟢 منخفض:', g['🟢 منخفض'])}
 
 🧾 تفسير تشغيلي:
 • متوسط آخر 3 ساعات + فلترة القيم الشاذة.
+• يتم إرسال تنبيه فوري عند تغير جوهري.
 """
 
-def build_alert(values,worst_city,worst):
-    score=compute_score(worst)
-    lvl=pm10_to_level(worst)
-    g=group_levels(values)
+def build_alert(values, worst_city, worst):
+    score = compute_score(worst)
+    lvl = pm10_to_level(worst)
+    g = group_levels(values)
 
     return f"""🚨 تنبيه غبار – المملكة العربية السعودية
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
@@ -191,62 +231,89 @@ def build_alert(values,worst_city,worst):
 {pin_sites(values)}
 
 ════════════════════
-{format_group('🔴 شديد:',g['🔴 شديد'])}
-{format_group('🟠 مرتفع:',g['🟠 مرتفع'])}
+{format_group('🔴 شديد:', g['🔴 شديد'])}
+{format_group('🟠 مرتفع:', g['🟠 مرتفع'])}
 
 ✅ توصية تشغيلية سريعة:
 • رفع الجاهزية حسب الإجراءات الداخلية.
+• متابعة التحديث القادم حسب الجدولة.
 """
+
+def build_no_data_message(failed_cities: List[str]) -> str:
+    ts = now.strftime("%Y-%m-%d %H:%M")
+    preview = "، ".join(failed_cities[:8])
+    extra = f" … +{len(failed_cities)-8}" if len(failed_cities) > 8 else ""
+    return (
+        "🌪️ تقرير الغبار – المملكة العربية السعودية\n"
+        f"🕒 {ts} KSA\n\n"
+        "⚠️ تعذر جلب بيانات PM10 في هذه الدورة.\n"
+        f"📍 المدن المتأثرة: {preview}{extra}\n"
+        "✅ سيتم المحاولة تلقائيًا في الدورة القادمة.\n"
+    )
 
 # =========================
 # Main
 # =========================
-if __name__=="__main__":
+if __name__ == "__main__":
+    print("Running Dust Report (robust, no timeouts) ...")
 
-    state=load_state()
-    values={}
+    state = load_state()
+    values: Dict[str, float] = {}
+    failed: List[str] = []
 
-    for c,(lat,lon) in KSA_POINTS.items():
-        v=fetch_pm10(lat,lon)
+    for c, (lat, lon) in KSA_POINTS.items():
+        v = fetch_pm10(lat, lon)
         if v is not None:
-            values[c]=v
+            values[c] = v
+        else:
+            failed.append(c)
 
+    # If no data at all: do NOT fail workflow; send status message at summary times only
     if not values:
-        raise SystemExit("No data")
+        summary_key = f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}"
+        if now.hour in SUMMARY_HOURS and state.get("last_summary_key") != summary_key:
+            send_telegram(build_no_data_message(failed))
+            state["last_summary_key"] = summary_key
+            save_state(state)
+        print("No data available; exiting cleanly.")
+        raise SystemExit(0)
 
-    worst_city=max(values,key=lambda x:values[x])
-    worst=values[worst_city]
-    worst_level=pm10_to_level(worst)
+    worst_city = max(values, key=lambda x: values[x])
+    worst = values[worst_city]
+    worst_level = pm10_to_level(worst)
 
-    groups=group_levels(values)
-    severe_set=set([c for c,_ in groups["🔴 شديد"]])
+    groups = group_levels(values)
+    severe_set = set([c for c, _ in groups["🔴 شديد"]])
+    any_high_or_severe = (len(groups["🔴 شديد"]) + len(groups["🟠 مرتفع"])) > 0
 
-    should_alert=False
+    should_alert = False
 
-    if state["last_worst_level"] is None:
-        should_alert = len(severe_set)>0
+    if state.get("last_worst_level") is None:
+        should_alert = any_high_or_severe
     else:
         if level_rank(worst_level) > level_rank(state["last_worst_level"]):
-            should_alert=True
+            should_alert = True
 
-        if state["last_alert_worst_pm10"]:
-            if worst - state["last_alert_worst_pm10"] >= DELTA_PM10_ALERT:
-                should_alert=True
+        last_alert_pm10 = state.get("last_alert_worst_pm10")
+        if last_alert_pm10 is not None and (worst - float(last_alert_pm10)) >= DELTA_PM10_ALERT:
+            should_alert = True
 
-        if set(state["last_severe_set"]) != severe_set:
-            should_alert=True
+        if set(state.get("last_severe_set", [])) != severe_set and any_high_or_severe:
+            should_alert = True
 
+    # Send alert if needed
     if should_alert:
-        send_telegram(build_alert(values,worst_city,worst))
-        state["last_alert_worst_pm10"]=worst
-        state["last_severe_set"]=list(severe_set)
+        send_telegram(build_alert(values, worst_city, worst))
+        state["last_alert_worst_pm10"] = float(worst)
+        state["last_severe_set"] = list(severe_set)
 
-    summary_key=f"{now.strftime('%Y-%m-%d')}-{now.hour}"
-    if now.hour in SUMMARY_HOURS and state["last_summary_key"] != summary_key:
-        send_telegram(build_summary(values,worst_city,worst))
-        state["last_summary_key"]=summary_key
+    # Summary at 6 & 18 only
+    summary_key = f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}"
+    if now.hour in SUMMARY_HOURS and state.get("last_summary_key") != summary_key:
+        send_telegram(build_summary(values, worst_city, worst))
+        state["last_summary_key"] = summary_key
 
-    state["last_worst_level"]=worst_level
+    state["last_worst_level"] = worst_level
     save_state(state)
 
     print("Dust monitoring completed.")
