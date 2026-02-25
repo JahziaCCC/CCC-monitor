@@ -3,18 +3,23 @@ name: AIS Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */3 * * *"
+    - cron: "0 * * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests
+
+      - run: pip install websocket-client requests
+
       - run: python mon_ais.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
