@@ -111,13 +111,19 @@ def compute_score(pm10_max: float) -> int:
     return int(max(0, min(100, (pm10_max / 300.0) * 100)))
 
 def fetch_pm10(lat: float, lon: float) -> Optional[float]:
-    # Open-Meteo Air Quality: hourly PM10, pick latest non-null
+    """
+    Fetch PM10 from Open-Meteo and return a robust value:
+    - Take the latest 3 non-null values
+    - Filter outliers (0 < PM10 < 600)
+    - Return average of up to 3 values
+    """
     url = (
         "https://air-quality-api.open-meteo.com/v1/air-quality"
         f"?latitude={lat}&longitude={lon}"
         "&hourly=pm10"
         "&timezone=Asia%2FRiyadh"
     )
+
     r = requests.get(url, timeout=25)
     r.raise_for_status()
     data = r.json()
@@ -127,23 +133,35 @@ def fetch_pm10(lat: float, lon: float) -> Optional[float]:
     if not pm10s:
         return None
 
-    for i in range(len(pm10s) - 1, -1, -1):
-        v = pm10s[i]
-        if v is not None:
-            return float(v)
-    return None
+    values: List[float] = []
+    for v in reversed(pm10s):
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+
+        # فلترة القيم الشاذة
+        if 0 < fv < 600:
+            values.append(fv)
+        if len(values) == 3:
+            break
+
+    if not values:
+        return None
+
+    return sum(values) / len(values)
 
 def group_cities_by_level(city_values: Dict[str, float]) -> Dict[str, List[Tuple[str, float]]]:
     groups = {"🔴 شديد": [], "🟠 مرتفع": [], "🟡 متوسط": [], "🟢 منخفض": []}
     for city, v in city_values.items():
         groups[pm10_to_level(v)].append((city, v))
-
-    # sort each group by PM10 desc
     for k in groups:
         groups[k].sort(key=lambda x: x[1], reverse=True)
     return groups
 
-def format_group(title: str, items: List[Tuple[str, float]], max_lines: int = 6) -> str:
+def format_group(title: str, items: List[Tuple[str, float]], max_lines: int = 8) -> str:
     if not items:
         return f"{title}\n- لا يوجد\n"
     lines = [f"{title}"]
@@ -157,7 +175,6 @@ def build_summary(city_values: Dict[str, float], worst_city: str, worst_pm10: fl
     ts = now.strftime("%Y-%m-%d %H:%M")
     worst_level = pm10_to_level(worst_pm10)
     score = compute_score(worst_pm10)
-
     groups = group_cities_by_level(city_values)
 
     return (
@@ -174,7 +191,8 @@ def build_summary(city_values: Dict[str, float], worst_city: str, worst_pm10: fl
         f"{format_group('🟡 متوسط:', groups['🟡 متوسط'])}"
         f"{format_group('🟢 منخفض:', groups['🟢 منخفض'])}\n"
         "🧾 تفسير تشغيلي:\n"
-        "• المؤشر يعتمد على PM10 كمؤشر تشغيلي للغبار.\n"
+        "• يعتمد القياس على PM10 كمؤشر تشغيلي للغبار.\n"
+        "• تم تطبيق فلترة للقيم الشاذة وأخذ متوسط آخر 3 ساعات.\n"
         "• يتم إرسال تنبيه فوري عند وصول/ارتفاع الحالة إلى مرتفع أو شديد.\n"
     )
 
@@ -184,9 +202,8 @@ def build_alert(city_values: Dict[str, float], worst_city: str, worst_pm10: floa
     score = compute_score(worst_pm10)
     groups = group_cities_by_level(city_values)
 
-    # show only High/Severe lists in alert (more focused)
-    severe_txt = format_group("🔴 شديد:", groups["🔴 شديد"], max_lines=8)
-    high_txt = format_group("🟠 مرتفع:", groups["🟠 مرتفع"], max_lines=8)
+    severe_txt = format_group("🔴 شديد:", groups["🔴 شديد"], max_lines=10)
+    high_txt = format_group("🟠 مرتفع:", groups["🟠 مرتفع"], max_lines=10)
 
     return (
         "🚨 تنبيه غبار – المملكة العربية السعودية\n"
@@ -206,7 +223,7 @@ def build_alert(city_values: Dict[str, float], worst_city: str, worst_pm10: floa
 # Main
 # =========================
 if __name__ == "__main__":
-    print("Running Dust Report (Smart) ...")
+    print("Running Dust Report (Smart + Robust) ...")
 
     state = load_state()
 
@@ -245,18 +262,14 @@ if __name__ == "__main__":
 
     # Alert logic (A)
     last_worst_level = state.get("last_worst_level")
-    # Unique key to avoid repeating same alert in the same hour with same worst and approx value
     alert_key = f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}-{worst_level}-{worst_city}-{int(worst_pm10)}"
 
     should_alert = False
     if last_worst_level is None:
-        # first run: alert only if high/severe exists
         should_alert = any_high_or_severe
     else:
-        # alert if worst level increased
         if level_rank(worst_level) > level_rank(last_worst_level):
             should_alert = True
-        # also alert if any high/severe and not repeated this hour
         if any_high_or_severe:
             should_alert = True
 
@@ -264,7 +277,7 @@ if __name__ == "__main__":
         send_telegram(build_alert(city_values, worst_city, worst_pm10))
         state["last_alert_key"] = alert_key
 
-    # Summary logic (B) only at 6 & 18, no duplicates
+    # Summary logic (B) only at 6 & 18, avoid duplicates
     summary_key = f"{now.strftime('%Y-%m-%d')}-{now.hour:02d}"
     if now.hour in SUMMARY_HOURS and state.get("last_summary_key") != summary_key:
         send_telegram(build_summary(city_values, worst_city, worst_pm10))
