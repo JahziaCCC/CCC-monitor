@@ -27,14 +27,13 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
 # =========================
-# Capture window
+# Capture / Retry
 # =========================
-CAPTURE_SECONDS = 180  # 3 دقائق
-RETRY_ON_ZERO = 1      # يعيد مرة إضافية إذا 0 رسائل
+CAPTURE_SECONDS = 180
+RETRY_ON_ZERO = 2  # جرّب 3 محاولات إجماليًا (0..2)
 
 # =========================
-# Smaller coastal boxes (KSA focus)
-# format: [[lat, lon], [lat, lon]]
+# Boxes (Coastal KSA focus)
 # =========================
 RED_SEA_BOXES = [
     [[16.2, 41.0], [18.5, 43.5]],  # جنوب (جازان تقريبًا)
@@ -42,12 +41,10 @@ RED_SEA_BOXES = [
     [[23.0, 37.0], [25.5, 39.8]],  # ينبع
     [[26.0, 35.0], [29.2, 38.6]],  # ضباء/نيوم تقريبًا
 ]
-
 GULF_BOXES = [
     [[24.0, 48.0], [28.7, 51.8]],  # الدمام/الجبيل/رأس تنورة
     [[26.8, 50.8], [30.5, 55.5]],  # امتداد شمال شرق
 ]
-
 ALL_BOXES = RED_SEA_BOXES + GULF_BOXES
 
 def normalize_box(box):
@@ -73,8 +70,7 @@ def is_oil_tanker(t):
 def send_telegram(text: str):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
     r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=25)
-    print("TELEGRAM:", r.status_code)
-    print("TELEGRAM RESPONSE:", r.text)
+    print("TELEGRAM:", r.status_code, r.text)
     r.raise_for_status()
 
 def build_report(samples_total, samples_pos, samples_static,
@@ -85,7 +81,7 @@ def build_report(samples_total, samples_pos, samples_static,
 
 ════════════════════
 📡 نافذة الالتقاط: {samples_total} رسالة (≈ {CAPTURE_SECONDS} ثانية)
-• PositionReport: {samples_pos}
+• Position*: {samples_pos}
 • ShipStaticData: {samples_static}
 
 📊 إجمالي السفن (فريدة داخل النطاق):
@@ -113,14 +109,13 @@ def build_diag(opened, close_code, close_reason, last_error, attempts, subsent):
 • close_reason: {close_reason or "N/A"}
 • last_error: {last_error or "N/A"}
 
-✅ معنى النتيجة:
-- إذا opened=False: الاتصال ما انفتح (شبكة/سيرفر).
-- إذا opened=True و subscription_sent=True لكن messages=0: غالبًا انقطاع/Throttle مؤقت من AISStream أو runner network.
-- جرّب Run workflow مرة ثانية بعد دقيقة.
+📍 تفسير:
+• opened=True + subscription_sent=True + messages=0
+  = غالبًا Throttle/انقطاع مؤقت أو الدفق ما أعطى رسائل ضمن نافذة الالتقاط.
 """
 
 def run_capture_once():
-    # ===== run state =====
+    # ===== state per attempt =====
     samples_total = 0
     samples_pos = 0
     samples_static = 0
@@ -141,6 +136,7 @@ def run_capture_once():
     close_code = None
     close_reason = ""
 
+    # ------- helpers -------
     def extract_mmsi(data):
         meta = data.get("MetaData") or data.get("Metadata") or {}
         m = meta.get("MMSI") or meta.get("mmsi")
@@ -149,14 +145,31 @@ def run_capture_once():
 
         mt = data.get("MessageType")
         try:
-            if mt == "PositionReport":
-                return str(data["Message"]["PositionReport"]["UserID"])
-            if mt == "ShipStaticData":
-                return str(data["Message"]["ShipStaticData"]["UserID"])
+            # fallback: most AISStream messages have UserID inside message blocks
+            msg = data.get("Message", {})
+            for k in ("PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport",
+                      "BaseStationReport", "ShipStaticData"):
+                if k in msg and "UserID" in msg[k]:
+                    return str(msg[k]["UserID"])
         except:
             return ""
         return ""
 
+    def extract_lat_lon_any_position(data):
+        msg = data.get("Message", {})
+        # try multiple position-like blocks
+        for k in ("PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport", "BaseStationReport"):
+            if k in msg:
+                blk = msg[k]
+                if "Latitude" in blk and "Longitude" in blk:
+                    return float(blk["Latitude"]), float(blk["Longitude"])
+        # fallback: metadata
+        meta = data.get("MetaData") or data.get("Metadata") or {}
+        if "latitude" in meta and "longitude" in meta:
+            return float(meta["latitude"]), float(meta["longitude"])
+        raise KeyError("No lat/lon found")
+
+    # ------- websocket callbacks -------
     def on_open(ws):
         nonlocal opened, subsent
         opened = True
@@ -164,20 +177,25 @@ def run_capture_once():
         sub = {
             "APIKey": API_KEY,
             "BoundingBoxes": ALL_BOXES,
-            "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
+            # ✅ وسّع الأنواع حتى ما نفقد رسائل Position
+            "FilterMessageTypes": [
+                "PositionReport",
+                "StandardClassBPositionReport",
+                "ExtendedClassBPositionReport",
+                "BaseStationReport",
+                "ShipStaticData",
+            ],
         }
         ws.send(json.dumps(sub))
         subsent = True
         print("Subscribed.")
 
     def on_message(ws, message):
-        nonlocal samples_total, samples_pos, samples_static
-        nonlocal pos_hits_red, pos_hits_gulf
+        nonlocal samples_total, samples_pos, samples_static, pos_hits_red, pos_hits_gulf, last_error
         samples_total += 1
 
-        # sometimes server sends text errors
+        # if server sends plain error text
         if isinstance(message, str) and '"error"' in message:
-            nonlocal last_error
             last_error = message
             print("SERVER ERROR:", message)
             return
@@ -207,12 +225,11 @@ def run_capture_once():
                 pass
             return
 
-        if mt == "PositionReport":
+        # any position-like type
+        if mt in ("PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport", "BaseStationReport"):
             samples_pos += 1
             try:
-                pr = data["Message"]["PositionReport"]
-                lat = float(pr["Latitude"])
-                lon = float(pr["Longitude"])
+                lat, lon = extract_lat_lon_any_position(data)
             except:
                 return
 
@@ -278,14 +295,12 @@ if __name__ == "__main__":
     attempts = 0
     result = None
 
-    # try once + retry if zero
     for i in range(RETRY_ON_ZERO + 1):
         attempts += 1
         result = run_capture_once()
         if result["samples_total"] > 0:
             break
-        # pause a bit then retry
-        time.sleep(15)
+        time.sleep(20)
 
     if result["samples_total"] == 0:
         send_telegram(build_diag(
