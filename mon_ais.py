@@ -2,53 +2,65 @@ import os
 import datetime
 import requests
 
-BOT = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+# =========================
+# Telegram
+# =========================
+BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
 # =========================
-# مناطق بحرية (تقريبية)
+# Dummy counts (replace later with AIS source)
 # =========================
 RED_SEA_SHIPS = 134
 GULF_SHIPS = 98
 
-PORTS = {
-    "ميناء جدة": "مرتفع",
-    "ميناء الدمام": "متوسط",
-    "ميناء ينبع": "منخفض",
-    "ميناء الجبيل": "منخفض"
-}
+PORTS_RED_SEA = ["ميناء جدة الإسلامي", "ميناء ينبع", "ميناء ضباء", "ميناء نيوم"]
+PORTS_GULF = ["ميناء الملك عبدالعزيز (الدمام)", "ميناء الجبيل التجاري", "رأس تنورة (منطقة نفطية)"]
 
-def send(msg):
-    url=f"https://api.telegram.org/bot{BOT}/sendMessage"
-    requests.post(url,json={"chat_id":CHAT_ID,"text":msg},timeout=20)
+def send_telegram(text: str):
+    if not BOT:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN secret")
+    if not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_CHAT_ID secret")
 
-def build_report():
+    url = f"https://api.telegram.org/bot{BOT}/sendMessage"
+    r = requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=25)
 
-    ports_text="\n".join([f"• {k}: {v}" for k,v in PORTS.items()])
+    # مهم جدًا للتشخيص في الـ Actions logs
+    print("TELEGRAM STATUS:", r.status_code)
+    print("TELEGRAM RESPONSE:", r.text)
 
-    return f"""🚢 تقرير الحركة البحرية – السعودية
+    r.raise_for_status()
+
+def build_report() -> str:
+    ports_rs = "\n".join([f"• {p}" for p in PORTS_RED_SEA])
+    ports_gf = "\n".join([f"• {p}" for p in PORTS_GULF])
+
+    return f"""🚢 تقرير الحركة البحرية – البحر الأحمر والخليج العربي
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📊 حركة السفن:
+📊 حركة السفن (تقديري/تشغيلي):
 • البحر الأحمر: {RED_SEA_SHIPS} سفينة
 • الخليج العربي: {GULF_SHIPS} سفينة
 
-⚠️ ازدحام الموانئ:
-{ports_text}
+⚓ الموانئ ضمن النطاق:
+🔴 البحر الأحمر:
+{ports_rs}
 
-🚨 أحداث بحرية:
-• لا يوجد تحذيرات جديدة
+🟦 الخليج العربي:
+{ports_gf}
 
 ════════════════════
 📍 ملاحظات تشغيلية:
-• حركة طبيعية.
-• متابعة التحديث القادم.
+• هذا تقرير تشغيل أولي (Baseline).
+• سيتم إضافة مصدر AIS فعلي + ازدحام الموانئ + تنبيهات ذكية.
 """
 
-if __name__=="__main__":
-    send(build_report())
-    print("AIS report sent")
+if __name__ == "__main__":
+    msg = build_report()
+    send_telegram(msg)
+    print("AIS report sent successfully.")
