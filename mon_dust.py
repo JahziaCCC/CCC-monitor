@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 import requests
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, List
 
 # =========================
 # Telegram
@@ -26,7 +26,7 @@ API_TIMEOUT_SEC = 20
 API_RETRIES = 2
 
 # =========================
-# Locations
+# Locations (Saudi Arabia)
 # =========================
 KSA_POINTS: Dict[str, Tuple[float, float]] = {
 
@@ -142,7 +142,7 @@ def format_group(title, items):
     return "\n".join(txt)+"\n"
 
 # =========================
-# IMPORTANT SITES (show only if exists)
+# Important sites (show only if data exists)
 # =========================
 def pin_sites(values):
     out=[]
@@ -177,8 +177,7 @@ def build_summary(values,worst_city,worst):
 ════════════════════
 📊 مؤشر الغبار: {score}/100
 📌 أعلى مستوى: {lvl}
-📍 الأعلى: {worst_city} ({worst:.0f} µg/m³)
-{important_section}
+📍 الأعلى: {worst_city} ({worst:.0f} µg/m³){important_section}
 ════════════════════
 {format_group('🔴 شديد:',g['🔴 شديد'])}
 {format_group('🟠 مرتفع:',g['🟠 مرتفع'])}
@@ -199,14 +198,14 @@ def build_alert(values,worst_city,worst):
 
 📌 أعلى مستوى مسجّل: {lvl}
 📊 مؤشر الغبار: {score}/100
-📍 الأعلى: {worst_city} ({worst:.0f} µg/m³)
-{important_section}
+📍 الأعلى: {worst_city} ({worst:.0f} µg/m³){important_section}
 ════════════════════
 {format_group('🔴 شديد:',g['🔴 شديد'])}
 {format_group('🟠 مرتفع:',g['🟠 مرتفع'])}
 
 ✅ توصية تشغيلية سريعة:
 • رفع الجاهزية حسب الإجراءات الداخلية.
+• متابعة التحديث القادم حسب الجدولة.
 """
 
 # =========================
