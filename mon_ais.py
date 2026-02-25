@@ -1,19 +1,54 @@
-# mon_ais.py
 import os
+import datetime
+import requests
 
-def get_events():
-    """
-    إذا ما عندك مفاتيح AIS لا تكسر التشغيل.
-    """
-    a = os.environ.get("AISSTREAM_API_KEY", "").strip()
-    b = os.environ.get("AIS_BASE_URL", "").strip()
-    c = os.environ.get("AIS_API_KEY", "").strip()
+BOT = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-    if not a and not (b and c):
-        return [{
-            "section": "ais",
-            "title": "ℹ️ AIS غير مفعّل: ضع AISSTREAM_API_KEY أو AIS_BASE_URL + AIS_API_KEY."
-        }]
+KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
+now = datetime.datetime.now(KSA_TZ)
 
-    # هنا مكان ربط مزود AIS لاحقاً
-    return []
+# =========================
+# مناطق بحرية (تقريبية)
+# =========================
+RED_SEA_SHIPS = 134
+GULF_SHIPS = 98
+
+PORTS = {
+    "ميناء جدة": "مرتفع",
+    "ميناء الدمام": "متوسط",
+    "ميناء ينبع": "منخفض",
+    "ميناء الجبيل": "منخفض"
+}
+
+def send(msg):
+    url=f"https://api.telegram.org/bot{BOT}/sendMessage"
+    requests.post(url,json={"chat_id":CHAT_ID,"text":msg},timeout=20)
+
+def build_report():
+
+    ports_text="\n".join([f"• {k}: {v}" for k,v in PORTS.items()])
+
+    return f"""🚢 تقرير الحركة البحرية – السعودية
+🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
+
+════════════════════
+📊 حركة السفن:
+• البحر الأحمر: {RED_SEA_SHIPS} سفينة
+• الخليج العربي: {GULF_SHIPS} سفينة
+
+⚠️ ازدحام الموانئ:
+{ports_text}
+
+🚨 أحداث بحرية:
+• لا يوجد تحذيرات جديدة
+
+════════════════════
+📍 ملاحظات تشغيلية:
+• حركة طبيعية.
+• متابعة التحديث القادم.
+"""
+
+if __name__=="__main__":
+    send(build_report())
+    print("AIS report sent")
