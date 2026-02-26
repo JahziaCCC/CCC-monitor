@@ -21,7 +21,7 @@ KSA_GULF    = [[24.0, 48.4], [28.9, 52.6]]
 REG_RED_SEA = [[12.0, 32.0], [30.5, 44.8]]
 REG_GULF    = [[21.0, 47.0], [30.5, 56.5]]
 
-# مواقع المملكة الاستراتيجية
+# مواقع المملكة الاستراتيجية (موانئ + محطات نفط)
 KSA_SITES = {
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
@@ -36,7 +36,7 @@ KSA_SITES = {
     "محطة نفط تناجيب": {"lat": 27.7948, "lon": 48.8921},
 }
 
-# موانئ إقليمية للـ fallback (قابلة للتوسع)
+# موانئ إقليمية للـ fallback
 REGIONAL_PORTS = {
     "ميناء راشد (دبي)": {"lat": 25.270, "lon": 55.275},
     "ميناء جبل علي": {"lat": 24.985, "lon": 55.060},
@@ -44,7 +44,7 @@ REGIONAL_PORTS = {
     "ميناء الفجيرة": {"lat": 25.120, "lon": 56.330},
 }
 
-def send(msg):
+def send(msg: str):
     requests.post(
         f"https://api.telegram.org/bot{BOT}/sendMessage",
         json={"chat_id": CHAT_ID, "text": msg},
@@ -65,13 +65,26 @@ def in_box(lat,lon,box):
 
 def get_lat_lon(d):
     meta=d.get("MetaData") or d.get("Metadata") or {}
-    if "latitude" in meta and "longitude" in meta:
-        return float(meta["latitude"]),float(meta["longitude"])
-    msg=d.get("Message",{})
-    for _,blk in msg.items():
-        if isinstance(blk,dict) and "Latitude" in blk and "Longitude" in blk:
-            return float(blk["Latitude"]),float(blk["Longitude"])
-    raise KeyError
+    lat = meta.get("latitude") or meta.get("Latitude") or meta.get("lat")
+    lon = meta.get("longitude") or meta.get("Longitude") or meta.get("lon")
+    if lat is not None and lon is not None:
+        lat=float(lat); lon=float(lon)
+    else:
+        msg=d.get("Message",{})
+        for _,blk in msg.items():
+            if isinstance(blk,dict) and "Latitude" in blk and "Longitude" in blk:
+                lat=float(blk["Latitude"]); lon=float(blk["Longitude"])
+                break
+        else:
+            raise KeyError
+
+    # تصحيح محتمل لتبديل lat/lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        if (-90 <= lon <= 90 and -180 <= lat <= 180):
+            lat, lon = lon, lat
+        else:
+            raise KeyError
+    return lat, lon
 
 def get_waiting(d):
     msg=d.get("Message",{})
@@ -125,13 +138,21 @@ def run_stream():
 
     return vessels
 
-def risk_index(total,waiting):
-    if total==0:
+# ✅ مؤشر مخاطر لا يطلع 0/100 عند وجود رصد فعلي
+def risk_index(total, waiting):
+    if total == 0:
         return 20
-    density=min(total/80,1)*50
-    ratio=waiting/total if total else 0
-    waiting_score=min(ratio/0.7,1)*50
-    return int(min(density+waiting_score,100))
+
+    density = min(total / 80.0, 1.0) * 50.0
+    ratio = (waiting / total) if total else 0.0
+    waiting_score = min(ratio / 0.70, 1.0) * 50.0
+
+    score = int(round(density + waiting_score))
+
+    # حد أدنى عند وجود رصد فعلي
+    score = max(score, 10)
+
+    return min(score, 100)
 
 def risk_label(x):
     if x>=80:return "🔴 مرتفع"
@@ -195,7 +216,7 @@ for v in ksa.values():
 top_sites=sorted(site_counts.items(),key=lambda x:x[1],reverse=True)
 top_sites=[x for x in top_sites if x[1]>0][:3]
 
-# ✅ fallback إقليمي (Nearest-port assignment)
+# fallback إقليمي (Nearest-port assignment)
 REG_RADIUS_KM = 200
 regional_counts = assign_to_nearest_port(regional, REGIONAL_PORTS, REG_RADIUS_KM)
 top_reg = sorted(regional_counts.items(), key=lambda x: x[1], reverse=True)
