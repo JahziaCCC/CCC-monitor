@@ -17,15 +17,21 @@ CONGESTION_RADIUS_KM = 250
 
 SAUDI_BIG_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
+# =========================
 # KSA-only (tight)
+# =========================
 KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]
 KSA_GULF    = [[24.0, 48.4], [28.9, 52.6]]
 
+# =========================
 # Regional corridors (wider)
+# =========================
 REG_RED_SEA = [[12.0, 32.0], [30.5, 44.8]]
 REG_GULF    = [[21.0, 47.0], [30.5, 56.5]]
 
+# =========================
 # KSA ports
+# =========================
 PORTS_KSA = {
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
@@ -39,7 +45,9 @@ PORTS_KSA = {
     "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
 }
 
+# =========================
 # Regional ports (fallback)
+# =========================
 PORTS_REGIONAL = {
     "ميناء راشد (دبي)": {"lat": 25.270, "lon": 55.275},
     "ميناء جبل علي (دبي)": {"lat": 24.985, "lon": 55.060},
@@ -247,7 +255,7 @@ def run_stream(boxes, seconds, type_cache):
     }
 
 def compute_port_stats(vessels, ports, topn=7):
-    # For each vessel: assign nearest port (even if far), and count those within radius
+    # Each vessel -> nearest port; count only those within radius.
     stats = {k: {"within": 0, "waiting": 0, "tankers_conf": 0, "type_unknown": 0, "min_d": None} for k in ports.keys()}
 
     for _, v in vessels.items():
@@ -262,7 +270,6 @@ def compute_port_stats(vessels, ports, topn=7):
         if best_name is None:
             continue
 
-        # track min distance always
         cur = stats[best_name]["min_d"]
         stats[best_name]["min_d"] = best_d if (cur is None or best_d < cur) else cur
 
@@ -277,12 +284,11 @@ def compute_port_stats(vessels, ports, topn=7):
             elif is_oil_tanker(t):
                 stats[best_name]["tankers_conf"] += 1
 
-    # Only show ports that have any signal: within>0 OR min_d not None
     usable = [(name, s) for name, s in stats.items() if s["min_d"] is not None]
     ranked = sorted(usable, key=lambda x: (x[1]["within"], x[1]["waiting"]), reverse=True)[:topn]
     return ranked
 
-def hotspots(vessels, cell_deg=0.5, topn=5):
+def hotspots(vessels, cell_deg=0.5, topn=7):
     grid = defaultdict(int)
     for _, v in vessels.items():
         lat = round(v["lat"]/cell_deg)*cell_deg
@@ -290,6 +296,40 @@ def hotspots(vessels, cell_deg=0.5, topn=5):
         grid[(lat, lon)] += 1
     ranked = sorted(grid.items(), key=lambda x: x[1], reverse=True)[:topn]
     return ranked
+
+# =========================
+# Risk Index (0-100)
+# Based on the busiest (top) port line in the used set.
+# =========================
+def clamp(x, a, b):
+    return max(a, min(b, x))
+
+def score_density(total):
+    return 40.0 * clamp(total / 120.0, 0.0, 1.0)
+
+def score_waiting(waiting, total):
+    if total <= 0:
+        return 0.0
+    ratio = waiting / total
+    return 35.0 * clamp(ratio / 0.80, 0.0, 1.0)
+
+def score_tankers(tankers_confirmed):
+    return 15.0 * clamp(tankers_confirmed / 10.0, 0.0, 1.0)
+
+def score_unknown(unknown, total):
+    if total <= 0:
+        return 0.0
+    ratio = unknown / total
+    return 10.0 * clamp(ratio / 0.60, 0.0, 1.0)
+
+def risk_label_for(idx):
+    if idx >= 80:
+        return "🔴 مرتفع"
+    if idx >= 55:
+        return "🟠 متوسط-مرتفع"
+    if idx >= 30:
+        return "🟡 متوسط"
+    return "🟢 منخفض"
 
 if __name__ == "__main__":
     type_cache = load_json(TYPE_CACHE_FILE, {})
@@ -318,9 +358,7 @@ if __name__ == "__main__":
     port_rank = compute_port_stats(used_v, used_ports, topn=7)
     hot = hotspots(used_v, cell_deg=0.5, topn=7)
 
-    pts = regional["sample_points"]
-    pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
-
+    # Clean port lines
     ports_lines = []
     for name, s in port_rank:
         within = s["within"]
@@ -329,7 +367,7 @@ if __name__ == "__main__":
         unk = s["type_unknown"]
         mind = s["min_d"] if s["min_d"] is not None else 10**9
 
-        # Only show meaningful lines (within>0 OR mind within 400km)
+        # show only meaningful (within>0 OR mind<=400km)
         if within == 0 and mind > 400:
             continue
 
@@ -337,11 +375,41 @@ if __name__ == "__main__":
             f"• {name}: ضمن {CONGESTION_RADIUS_KM}كم = {within} | منتظرة/راسية {waiting} | ناقلات مؤكدة {tank_conf} | نوع غير معروف {unk} | أقرب مسافة ~{mind:.0f}كم"
         )
 
-    hot_lines = []
-    for (lat, lon), cnt in hot:
-        hot_lines.append(f"• خلية lat={lat:.1f}, lon={lon:.1f} : {cnt} سفينة")
+    hot_lines = [f"• خلية lat={lat:.1f}, lon={lon:.1f} : {cnt} سفينة" for (lat, lon), cnt in hot]
 
-    msg = f"""🚢 تقرير الملاحة (موانئ + محطات نفط) — Smart Clean
+    # Sample points
+    pts = regional["sample_points"]
+    pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
+
+    # Risk index based on busiest port (first in rank)
+    top_name = "N/A"
+    top_total = 0
+    top_waiting = 0
+    top_tank = 0
+    top_unk = 0
+    if port_rank:
+        top_name, top_s = port_rank[0]
+        top_total = top_s["within"]
+        top_waiting = top_s["waiting"]
+        top_tank = top_s["tankers_conf"]
+        top_unk = top_s["type_unknown"]
+
+    S = (
+        score_density(top_total) +
+        score_waiting(top_waiting, top_total) +
+        score_tankers(top_tank) +
+        score_unknown(top_unk, top_total)
+    )
+    risk_index = int(round(clamp(S, 0.0, 100.0)))
+    risk_lbl = risk_label_for(risk_index)
+
+    risk_block = f"""📊 مؤشر المخاطر البحري:
+• {risk_index}/100 — {risk_lbl}
+• المرجع: {top_name} (ضمن {CONGESTION_RADIUS_KM}كم: {top_total} سفينة، انتظار/رسو {top_waiting})
+• تفسير: يعتمد على كثافة السفن + نسبة الرسو/الانتظار + ناقلات النفط المؤكدة + مستوى عدم اليقين (Unknown).
+"""
+
+    msg = f"""🚢 تقرير الملاحة (موانئ + محطات نفط) — Smart Clean + Risk
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
@@ -354,6 +422,9 @@ if __name__ == "__main__":
 🌐 Regional vessels: {len(reg_v)}
 📍 الحساب المستخدم: {used_label}
 {note}
+
+════════════════════
+{risk_block}
 
 ════════════════════
 ⚓ أقرب الموانئ/المحطات (منطق نظيف):
