@@ -36,7 +36,7 @@ KSA_SITES = {
     "محطة نفط تناجيب": {"lat": 27.7948, "lon": 48.8921},
 }
 
-# موانئ إقليمية للـ fallback
+# موانئ إقليمية للـ fallback (قابلة للتوسع)
 REGIONAL_PORTS = {
     "ميناء راشد (دبي)": {"lat": 25.270, "lon": 55.275},
     "ميناء جبل علي": {"lat": 24.985, "lon": 55.060},
@@ -64,12 +64,12 @@ def in_box(lat,lon,box):
     return min(a1,a2)<=lat<=max(a1,a2) and min(o1,o2)<=lon<=max(o1,o2)
 
 def get_lat_lon(d):
-    meta=d.get("MetaData",{})
+    meta=d.get("MetaData") or d.get("Metadata") or {}
     if "latitude" in meta and "longitude" in meta:
         return float(meta["latitude"]),float(meta["longitude"])
     msg=d.get("Message",{})
     for _,blk in msg.items():
-        if isinstance(blk,dict) and "Latitude" in blk:
+        if isinstance(blk,dict) and "Latitude" in blk and "Longitude" in blk:
             return float(blk["Latitude"]),float(blk["Longitude"])
     raise KeyError
 
@@ -77,7 +77,7 @@ def get_waiting(d):
     msg=d.get("Message",{})
     for _,blk in msg.items():
         if isinstance(blk,dict):
-            sog=blk.get("Sog") or blk.get("SOG")
+            sog=blk.get("Sog") or blk.get("SOG") or blk.get("SpeedOverGround")
             if sog is not None:
                 try:
                     return float(sog)<=WAITING_SPEED_KTS
@@ -87,11 +87,8 @@ def get_waiting(d):
 
 def run_stream():
     vessels={}
-    opened=False
 
     def on_open(ws):
-        nonlocal opened
-        opened=True
         ws.send(json.dumps({
             "APIKey":API_KEY,
             "BoundingBoxes":[SAUDI_BIG_BOX]
@@ -104,7 +101,8 @@ def run_stream():
         except:
             return
 
-        m=d.get("MetaData",{}).get("MMSI")
+        meta=d.get("MetaData") or d.get("Metadata") or {}
+        m=meta.get("MMSI") or meta.get("mmsi")
         if not m:
             return
 
@@ -122,7 +120,7 @@ def run_stream():
 
     t=threading.Timer(CAPTURE_SECONDS,lambda: ws.close())
     t.start()
-    ws.run_forever()
+    ws.run_forever(ping_interval=20, ping_timeout=10)
     t.cancel()
 
     return vessels
@@ -140,6 +138,27 @@ def risk_label(x):
     if x>=55:return "🟠 متوسط-مرتفع"
     if x>=30:return "🟡 متوسط"
     return "🟢 منخفض"
+
+def activity_bucket(n):
+    if n >= 30: return "مرتفعة"
+    if n >= 12: return "متوسطة"
+    if n >= 4:  return "محدودة"
+    return "منخفضة"
+
+# ✅ توزيع السفن على “أقرب ميناء” (بدون ازدواجية)
+def assign_to_nearest_port(vessels_dict, ports_dict, radius_km):
+    counts = {k: 0 for k in ports_dict}
+    for v in vessels_dict.values():
+        best_name = None
+        best_d = 10**9
+        for name, p in ports_dict.items():
+            d = haversine(v["lat"], v["lon"], p["lat"], p["lon"])
+            if d < best_d:
+                best_d = d
+                best_name = name
+        if best_name is not None and best_d <= radius_km:
+            counts[best_name] += 1
+    return counts
 
 # ================= MAIN =================
 vessels=run_stream()
@@ -162,11 +181,11 @@ waiting_ksa=sum(1 for v in ksa.values() if v["waiting"])
 score=risk_index(total_ksa,waiting_ksa)
 label=risk_label(score)
 
-# ===== الحركة =====
+# حركة داخل سواحل المملكة
 red=sum(1 for v in ksa.values() if in_box(v["lat"],v["lon"],KSA_RED_SEA))
 gulf=sum(1 for v in ksa.values() if in_box(v["lat"],v["lon"],KSA_GULF))
 
-# ===== نشاط الموانئ السعودية =====
+# نشاط قرب المواقع السعودية
 site_counts={k:0 for k in KSA_SITES}
 for v in ksa.values():
     for s,loc in KSA_SITES.items():
@@ -176,17 +195,13 @@ for v in ksa.values():
 top_sites=sorted(site_counts.items(),key=lambda x:x[1],reverse=True)
 top_sites=[x for x in top_sites if x[1]>0][:3]
 
-# ===== fallback إقليمي =====
-regional_ports={k:0 for k in REGIONAL_PORTS}
-for v in regional.values():
-    for p,loc in REGIONAL_PORTS.items():
-        if haversine(v["lat"],v["lon"],loc["lat"],loc["lon"])<=200:
-            regional_ports[p]+=1
+# ✅ fallback إقليمي (Nearest-port assignment)
+REG_RADIUS_KM = 200
+regional_counts = assign_to_nearest_port(regional, REGIONAL_PORTS, REG_RADIUS_KM)
+top_reg = sorted(regional_counts.items(), key=lambda x: x[1], reverse=True)
+top_reg = [x for x in top_reg if x[1] > 0][:2]
 
-top_reg=sorted(regional_ports.items(),key=lambda x:x[1],reverse=True)
-top_reg=[x for x in top_reg if x[1]>0][:2]
-
-# ===== بناء التقرير =====
+# بناء الملخص
 if total_ksa==0:
     summary = (
         "• لا توجد تغطية AIS كافية داخل سواحل المملكة.\n"
@@ -199,13 +214,13 @@ else:
     )
 
 if top_sites:
-    ports_txt="\n".join([f"• {n}: نشاط {'مرتفع' if c>30 else 'متوسط' if c>10 else 'منخفض'} ({c})" for n,c in top_sites])
+    ports_txt="\n".join([f"• {n}: نشاط {activity_bucket(c)} ({c})" for n,c in top_sites])
 else:
     ports_txt="• لا توجد كثافة واضحة قرب موانئ المملكة حالياً."
 
 regional_txt=""
 if total_ksa==0 and top_reg:
-    regional_txt="\n".join([f"• {n}: كثافة {'مرتفعة' if c>50 else 'متوسطة'} ({c})" for n,c in top_reg])
+    regional_txt="\n".join([f"• {n}: كثافة {activity_bucket(c)} ({c})" for n,c in top_reg])
 
 msg=f"""⚓ التقرير البحري الوطني – غرفة العمليات (Smart Executive)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
