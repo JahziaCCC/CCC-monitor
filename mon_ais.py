@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import time
 import threading
 import datetime
 import requests
@@ -13,24 +14,20 @@ API_KEY = os.environ["AISSTREAM_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
-CAPTURE_SECONDS = 180  # 3 minutes
-
-# صندوق يغطي البحر الأحمر + الخليج + سواحل المملكة
-SAUDI_REGION_BOX = [[10.0, 32.0], [32.5, 58.5]]  # [[lat,lon],[lat,lon]]
-
-STATE_FILE = "ais_ports_state.json"
 TYPE_CACHE_FILE = "ais_type_cache.json"
 
-WAITING_SPEED_KTS = 0.7
-ALERT_WAITING_SPIKE = 8
+# ===== إعدادات المسح =====
+CAPTURE_EACH_SECONDS = 45      # مدة الالتقاط لكل ميناء/محطة
+SLEEP_BETWEEN = 2              # راحة بسيطة بين الاتصالات
+BOX_RADIUS_KM = 120            # صندوق حول الميناء/المحطة (يغطي مناطق الانتظار offshore)
 
-# ====== نطاق الازدحام حول الميناء/المحطة (km) ======
-CONGESTION_RADIUS_KM = 120  # واسع ويشمل مناطق الانتظار offshore
+WAITING_SPEED_KTS = 0.7        # (احتياطي) لو توفرت السرعة
+# ملاحظة: nav status غالبًا ما يجي دائمًا مع AISStream، فبنستخدمه إذا توفر
 
 # =========================
 # Ports + Oil Terminals (KSA)
 # =========================
-PORTS = {
+SITES = {
     # Red Sea
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
@@ -48,6 +45,13 @@ PORTS = {
     "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
 }
 
+def send_telegram(text: str):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": text},
+        timeout=25
+    )
+
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -62,71 +66,73 @@ def save_json(path, obj):
     except Exception:
         pass
 
-def send_telegram(text: str):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text},
-        timeout=25
-    )
+def km_to_deg_lat(km: float) -> float:
+    return km / 111.0
 
-def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlon/2)**2
-    return 2 * R * math.asin(math.sqrt(a))
+def km_to_deg_lon(km: float, lat: float) -> float:
+    # 1 deg lon = 111km * cos(lat)
+    c = math.cos(math.radians(lat))
+    if c < 0.2:
+        c = 0.2
+    return km / (111.0 * c)
+
+def make_box(lat, lon, radius_km):
+    dlat = km_to_deg_lat(radius_km)
+    dlon = km_to_deg_lon(radius_km, lat)
+    return [[lat - dlat, lon - dlon], [lat + dlat, lon + dlon]]
 
 def extract_mmsi(data):
     meta = data.get("MetaData") or data.get("Metadata") or {}
     m = meta.get("MMSI") or meta.get("mmsi")
     if m:
         return str(m)
-
     msg = data.get("Message", {})
     for _, blk in msg.items():
         if isinstance(blk, dict) and "UserID" in blk:
             return str(blk["UserID"])
     return ""
 
-def extract_lat_lon_and_block(data):
-    # 1) try Message blocks
+def extract_lat_lon(data):
+    # الأفضل: MetaData (غالبًا موجود)
+    meta = data.get("MetaData") or data.get("Metadata") or {}
+    if "latitude" in meta and "longitude" in meta:
+        return float(meta["latitude"]), float(meta["longitude"])
+    # fallback: Message blocks
     msg = data.get("Message", {})
     for _, blk in msg.items():
-        if isinstance(blk, dict) and ("Latitude" in blk) and ("Longitude" in blk):
-            return float(blk["Latitude"]), float(blk["Longitude"]), blk
+        if isinstance(blk, dict) and "Latitude" in blk and "Longitude" in blk:
+            return float(blk["Latitude"]), float(blk["Longitude"])
+    raise KeyError
 
-    # 2) fallback to metadata
-    meta = data.get("MetaData") or data.get("Metadata") or {}
-    if ("latitude" in meta) and ("longitude" in meta):
-        return float(meta["latitude"]), float(meta["longitude"]), {}
-
-    raise KeyError("No lat/lon")
-
-def get_sog_knots(blk: dict):
-    for k in ("Sog", "SOG", "SpeedOverGround", "Speed"):
-        if k in blk:
-            try:
-                return float(blk[k])
-            except Exception:
-                pass
+def get_nav_status(data):
+    msg = data.get("Message", {})
+    for _, blk in msg.items():
+        if isinstance(blk, dict):
+            for k in ("NavigationalStatus", "NavStatus", "NavigationStatus"):
+                if k in blk:
+                    try:
+                        return int(blk[k])
+                    except Exception:
+                        pass
     return None
 
-def get_nav_status(blk: dict):
-    for k in ("NavigationalStatus", "NavStatus", "NavigationStatus"):
-        if k in blk:
-            try:
-                return int(blk[k])
-            except Exception:
-                pass
+def get_sog_knots(data):
+    msg = data.get("Message", {})
+    for _, blk in msg.items():
+        if isinstance(blk, dict):
+            for k in ("Sog", "SOG", "SpeedOverGround", "Speed"):
+                if k in blk:
+                    try:
+                        return float(blk[k])
+                    except Exception:
+                        pass
     return None
 
-def is_waiting(blk: dict):
-    nav = get_nav_status(blk)
-    sog = get_sog_knots(blk)
-    if nav in (1, 5):  # anchored / moored (شائع)
+def is_waiting(data):
+    nav = get_nav_status(data)
+    if nav in (1, 5):  # anchored/moored
         return True
+    sog = get_sog_knots(data)
     if sog is not None and sog <= WAITING_SPEED_KTS:
         return True
     return False
@@ -138,53 +144,21 @@ def is_oil_tanker(vtype):
         v = 0
     return 80 <= v <= 89
 
-def congestion_level(total, waiting):
-    if waiting >= 20 or total >= 80:
-        return "🔴 شديد"
-    if waiting >= 10 or total >= 40:
-        return "🟠 مرتفع"
-    if waiting >= 4 or total >= 15:
-        return "🟡 متوسط"
-    return "🟢 منخفض"
-
-def nearest_port(lat, lon):
-    best_name = None
-    best_d = 10**9
-    for name, p in PORTS.items():
-        d = haversine_km(p["lat"], p["lon"], lat, lon)
-        if d < best_d:
-            best_d = d
-            best_name = name
-    return best_name, best_d
-
-def run_capture():
-    type_cache = load_json(TYPE_CACHE_FILE, {})  # mmsi -> type
-
+def capture_for_box(box, seconds, type_cache):
+    seen = set()
+    waiting = set()
+    tankers = set()
     samples_total = 0
     samples_pos = 0
     samples_static = 0
-    valid_latlon = 0
-
-    # track unique vessels (last position in window)
-    vessels = {}  # mmsi -> {"lat","lon","waiting","type"}
-
-    # track min/max for diagnostics
-    min_lat = 999
-    max_lat = -999
-    min_lon = 999
-    max_lon = -999
 
     def on_open(ws):
-        ws.send(json.dumps({
-            "APIKey": API_KEY,
-            "BoundingBoxes": [SAUDI_REGION_BOX]
-        }))
+        ws.send(json.dumps({"APIKey": API_KEY, "BoundingBoxes": [box]}))
 
     def on_message(ws, message):
-        nonlocal samples_total, samples_pos, samples_static, valid_latlon
-        nonlocal min_lat, max_lat, min_lon, max_lon
-
+        nonlocal samples_total, samples_pos, samples_static
         samples_total += 1
+
         try:
             data = json.loads(message)
         except Exception:
@@ -207,36 +181,21 @@ def run_capture():
             return
 
         try:
-            lat, lon, blk = extract_lat_lon_and_block(data)
+            _ = extract_lat_lon(data)
         except Exception:
             return
 
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            return
-
-        valid_latlon += 1
         samples_pos += 1
+        seen.add(mmsi)
 
-        min_lat = min(min_lat, lat)
-        max_lat = max(max_lat, lat)
-        min_lon = min(min_lon, lon)
-        max_lon = max(max_lon, lon)
+        # waiting
+        if is_waiting(data):
+            waiting.add(mmsi)
 
-        vtype = 0
-        if isinstance(blk, dict) and "Type" in blk:
-            try:
-                vtype = int(blk.get("Type", 0))
-            except Exception:
-                vtype = 0
-        if not vtype:
-            vtype = type_cache.get(mmsi, 0)
-
-        vessels[mmsi] = {
-            "lat": lat,
-            "lon": lon,
-            "waiting": is_waiting(blk) if isinstance(blk, dict) else False,
-            "type": vtype
-        }
+        # tanker by cached/static type (إذا ما توفر الآن يتحسن مع الوقت)
+        vtype = type_cache.get(mmsi, 0)
+        if is_oil_tanker(vtype):
+            tankers.add(mmsi)
 
     ws = websocket.WebSocketApp(
         "wss://stream.aisstream.io/v0/stream",
@@ -244,103 +203,76 @@ def run_capture():
         on_message=on_message
     )
 
-    timer = threading.Timer(CAPTURE_SECONDS, lambda: ws.close())
+    timer = threading.Timer(seconds, lambda: ws.close())
     timer.start()
     ws.run_forever(ping_interval=20, ping_timeout=10)
     timer.cancel()
 
-    save_json(TYPE_CACHE_FILE, type_cache)
-
-    diag = {
-        "min_lat": None if valid_latlon == 0 else round(min_lat, 4),
-        "max_lat": None if valid_latlon == 0 else round(max_lat, 4),
-        "min_lon": None if valid_latlon == 0 else round(min_lon, 4),
-        "max_lon": None if valid_latlon == 0 else round(max_lon, 4),
+    return {
+        "samples_total": samples_total,
+        "samples_pos": samples_pos,
+        "samples_static": samples_static,
+        "ships": len(seen),
+        "waiting": len(waiting),
+        "tankers": len(tankers)
     }
 
-    return samples_total, samples_pos, samples_static, valid_latlon, vessels, diag
+def level(total, waiting):
+    if waiting >= 15 or total >= 60:
+        return "🔴 شديد"
+    if waiting >= 7 or total >= 30:
+        return "🟠 مرتفع"
+    if waiting >= 3 or total >= 12:
+        return "🟡 متوسط"
+    return "🟢 منخفض"
 
 if __name__ == "__main__":
-    prev_state = load_json(STATE_FILE, {"ports": {}, "ts": ""})
-
-    total, pos, stat, valid_latlon, vessels, diag = run_capture()
-
-    # build congestion per port by distance
-    ports_now = {}
-    near_hits = 0
-    nearest_bucket = {"<=50km": 0, "<=120km": 0, ">120km": 0}
-
-    for port in PORTS.keys():
-        ports_now[port] = {"total": 0, "waiting": 0, "tankers": 0}
-
-    for mmsi, v in vessels.items():
-        name, d = nearest_port(v["lat"], v["lon"])
-
-        if d <= 50:
-            nearest_bucket["<=50km"] += 1
-        elif d <= CONGESTION_RADIUS_KM:
-            nearest_bucket["<=120km"] += 1
-        else:
-            nearest_bucket[">120km"] += 1
-
-        # count if within congestion radius of ANY port (by nearest)
-        if d <= CONGESTION_RADIUS_KM:
-            near_hits += 1
-
-        # also attribute vessel to ALL ports within radius (more realistic if overlapping)
-        for port_name, p in PORTS.items():
-            dd = haversine_km(p["lat"], p["lon"], v["lat"], v["lon"])
-            if dd <= CONGESTION_RADIUS_KM:
-                ports_now[port_name]["total"] += 1
-                if v["waiting"]:
-                    ports_now[port_name]["waiting"] += 1
-                if is_oil_tanker(v.get("type", 0)):
-                    ports_now[port_name]["tankers"] += 1
-
-    # rank by waiting then total
-    ranked = sorted(ports_now.items(), key=lambda x: (x[1]["waiting"], x[1]["total"]), reverse=True)
+    type_cache = load_json(TYPE_CACHE_FILE, {})
 
     lines = []
-    alerts = []
-    for name, v in ranked:
-        prev = (prev_state.get("ports", {}).get(name) or {})
-        d_wait = v["waiting"] - int(prev.get("waiting", 0))
-        d_total = v["total"] - int(prev.get("total", 0))
+    any_hits = 0
+    diag_msgs = 0
+    diag_pos = 0
+    diag_static = 0
 
-        lvl = congestion_level(v["total"], v["waiting"])
-        lines.append(
-            f"{lvl} {name}\n"
-            f"• إجمالي ضمن {CONGESTION_RADIUS_KM}كم: {v['total']} (Δ {d_total:+}) | منتظرة/راسية: {v['waiting']} (Δ {d_wait:+}) | ناقلات: {v['tankers']}"
-        )
+    for name, p in SITES.items():
+        box = make_box(p["lat"], p["lon"], BOX_RADIUS_KM)
+        r = capture_for_box(box, CAPTURE_EACH_SECONDS, type_cache)
 
-        if d_wait >= ALERT_WAITING_SPIKE and v["waiting"] >= 5:
-            alerts.append(f"🚨 ازدحام متصاعد في {name}: +{d_wait} سفن منتظرة")
+        diag_msgs += r["samples_total"]
+        diag_pos += r["samples_pos"]
+        diag_static += r["samples_static"]
 
-    save_json(STATE_FILE, {"ports": ports_now, "ts": now.strftime("%Y-%m-%d %H:%M")})
+        if r["ships"] > 0:
+            any_hits += 1
+            lvl = level(r["ships"], r["waiting"])
+            lines.append(
+                f"{lvl} {name}\n"
+                f"• إجمالي ضمن ~{BOX_RADIUS_KM}كم: {r['ships']} | منتظرة/راسية: {r['waiting']} | ناقلات (Type cache): {r['tankers']}"
+            )
+        else:
+            lines.append(
+                f"⚠️ {name}\n"
+                f"• لا توجد تغطية AIS قريبة ضمن نافذة الالتقاط ({CAPTURE_EACH_SECONDS}s)"
+            )
 
-    header = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Distance)
+        time.sleep(SLEEP_BETWEEN)
+
+    save_json(TYPE_CACHE_FILE, type_cache)
+
+    header = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Port Sweep)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📡 رسائل: {total}
-📍 Position: {pos} | Static: {stat}
+📡 تشخيص:
+• sites scanned: {len(SITES)}
+• sites with hits: {any_hits}
+• total messages: {diag_msgs}
+• total position: {diag_pos}
+• total static: {diag_static}
 
-🔎 تشخيص:
-• Valid lat/lon: {valid_latlon}
-• Vessels unique: {len(vessels)}
-• Near ports (<= {CONGESTION_RADIUS_KM}km): {near_hits}
-• Nearest port dist: <=50km={nearest_bucket['<=50km']}, <=120km={nearest_bucket['<=120km']}, >120km={nearest_bucket['>120km']}
-• Lat/Lon window: lat[{diag['min_lat']},{diag['max_lat']}], lon[{diag['min_lon']},{diag['max_lon']}]
-
-════════════════════
+📌 ملاحظة:
+• AISStream تغطيتها تختلف حسب المحطات الأرضية ولا تضمن تغطية كاملة قرب كل ميناء/محطة في كل وقت. 
 """
 
-    body = "\n\n".join(lines[:15]) if lines else "لا توجد بيانات ضمن نافذة الالتقاط."
-    send_telegram(header + body)
-
-    if alerts:
-        send_telegram(
-            "🚨 تنبيهات ازدحام (Port Congestion)\n"
-            + "\n".join(alerts)
-            + f"\n🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA"
-        )
+    send_telegram(header + "\n════════════════════\n" + "\n\n".join(lines))
