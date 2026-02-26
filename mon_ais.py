@@ -13,29 +13,31 @@ GLOBAL_TEST_SECONDS = 20
 TYPE_CACHE_FILE = "ais_type_cache.json"
 
 WAITING_SPEED_KTS = 0.7
-CONGESTION_RADIUS_KM = 200
+CONGESTION_RADIUS_KM = 250  # 250كم مناسب للموانئ/محطات النفط + مناطق الانتظار القريبة
 
-# ✅ صندوق كبير ثابت
-SAUDI_REGION_BOX = [[10.0, 32.0], [32.5, 58.5]]
+# ✅ اشتراك ثابت (واسع) لأنه يشتغل عندك
+SAUDI_BIG_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
-# ✅ ممرات موسّعة (فلترة محلية فقط)
-# البحر الأحمر + خليج العقبة (وسعنا lon قليل شمالاً)
-RED_SEA_CORRIDOR = [[12.0, 32.0], [32.5, 44.8]]     # lat 12..32.5, lon 32..44.8
+# ✅ فلترة محلية ضيّقة لسواحل المملكة فقط
+# البحر الأحمر (ساحل المملكة) — يستبعد شمالاً جهة فلسطين/إسرائيل
+KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]   # lat 16..29.8, lon 34..41.8
 
-# الخليج العربي + امتداد شرقي (عشان lon عندك يوصل 55)
-ARABIAN_GULF_CORRIDOR = [[19.0, 46.0], [31.5, 56.2]]  # lat 19..31.5, lon 46..56.2
+# الخليج العربي (ساحل المملكة) — يستبعد دبي/عُمان
+KSA_GULF = [[24.0, 48.4], [28.9, 52.6]]      # lat 24..28.9, lon 48.4..52.6
 
 PORTS = {
-    # Red Sea
+    # Red Sea (KSA)
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
     "ميناء ينبع التجاري": {"lat": 24.0665, "lon": 38.0675},
-    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573},
+    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573},  # جازان قريب من الحد، ممكن يطلع قليل حسب التغطية
     "ميناء ضباء": {"lat": 27.5606, "lon": 35.5440},
-    # Gulf
+
+    # Gulf (KSA)
     "ميناء الملك عبدالعزيز (الدمام)": {"lat": 26.4410, "lon": 50.1485},
     "ميناء الجبيل التجاري": {"lat": 27.0241, "lon": 49.6793},
-    # Oil terminals
+
+    # Oil terminals (KSA)
     "محطة نفط رأس تنورة": {"lat": 26.6726, "lon": 50.1219},
     "محطة نفط الجعيمة (Juaymah)": {"lat": 26.93, "lon": 50.06},
     "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
@@ -106,7 +108,6 @@ def extract_lat_lon(data):
     if lat is None or lon is None:
         raise KeyError
 
-    # sanity + swap
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         if (-90 <= lon <= 90 and -180 <= lat <= 180):
             lat, lon = lon, lat
@@ -169,7 +170,7 @@ def run_stream(boxes, seconds, type_cache):
     samples_static = 0
 
     vessels = {}
-    points = []  # sample points
+    points = []
 
     min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
 
@@ -277,38 +278,36 @@ def compute_ports(vessels):
 if __name__ == "__main__":
     type_cache = load_json(TYPE_CACHE_FILE, {})
 
-    regional = run_stream([SAUDI_REGION_BOX], CAPTURE_SECONDS, type_cache)
+    regional = run_stream([SAUDI_BIG_BOX], CAPTURE_SECONDS, type_cache)
     glob = run_stream([[[-90.0, -180.0], [90.0, 180.0]]], GLOBAL_TEST_SECONDS, type_cache)
 
     save_json(TYPE_CACHE_FILE, type_cache)
 
     all_v = regional["vessels"]
-    red_v = {}
-    gulf_v = {}
 
+    # ✅ فلترة KSA-only: لازم تكون السفينة داخل أحد الممرين (البحر الأحمر KSA أو الخليج KSA)
+    ksa_v = {}
     for m, v in all_v.items():
-        if in_box(v["lat"], v["lon"], RED_SEA_CORRIDOR):
-            red_v[m] = v
-        if in_box(v["lat"], v["lon"], ARABIAN_GULF_CORRIDOR):
-            gulf_v[m] = v
+        if in_box(v["lat"], v["lon"], KSA_RED_SEA) or in_box(v["lat"], v["lon"], KSA_GULF):
+            ksa_v[m] = v
 
-    corridor_v = dict(red_v)
-    corridor_v.update(gulf_v)
+    excluded = len(all_v) - len(ksa_v)
 
-    outside = len(all_v) - len(set(list(red_v.keys()) + list(gulf_v.keys())))
-
-    ports_now, near50, nearR, buckets = compute_ports(corridor_v)
+    ports_now, near50, nearR, buckets = compute_ports(ksa_v)
     ranked = sorted(ports_now.items(), key=lambda x: (x[1]["waiting"], x[1]["total"]), reverse=True)
 
     lines = []
     for name, v in ranked:
         lvl = congestion_level(v["total"], v["waiting"])
-        lines.append(f"{lvl} {name}\n• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}")
+        lines.append(
+            f"{lvl} {name}\n"
+            f"• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}"
+        )
 
     pts = regional["sample_points"]
     pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
 
-    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Big Box + Wider Corridors + Samples)
+    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (KSA-only Filter)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
@@ -317,13 +316,11 @@ if __name__ == "__main__":
 • vessels unique (all): {len(all_v)}
 • lat/lon window (all): {regional['latlon_window'] or 'N/A'}
 
-🧭 فلترة محلية (موسّعة):
-• Red Sea corridor: {len(red_v)}
-• Gulf corridor: {len(gulf_v)}
-• Total corridor vessels: {len(corridor_v)}
-• Outside corridors: {outside}
+🇸🇦 فلترة “سواحل المملكة فقط”:
+• KSA coastal vessels: {len(ksa_v)}
+• Excluded (outside KSA coastal corridors): {excluded}
 
-📍 قرب موانئ/محطات المملكة (من سفن الممرات فقط):
+📍 قرب موانئ/محطات المملكة (من السفن السعودية فقط):
 • <=50كم={near50} | <= {CONGESTION_RADIUS_KM}كم={nearR}
 • nearest dist buckets: 0-50={buckets[0]}, 50-{CONGESTION_RADIUS_KM}={buckets[1]}, >{CONGESTION_RADIUS_KM}={buckets[2]}
 
@@ -335,7 +332,7 @@ if __name__ == "__main__":
 • last_error: {regional['last_error'] or 'N/A'}
 
 ════════════════════
-📌 عينة نقاط (أول 10):
+📌 عينة نقاط (أول 10 من الدفق العام):
 {pts_txt}
 
 ════════════════════
