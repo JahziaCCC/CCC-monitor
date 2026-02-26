@@ -7,19 +7,25 @@ API_KEY = os.environ["AISSTREAM_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
-CAPTURE_SECONDS = 600   # 10 دقائق
+CAPTURE_SECONDS = 600          # 10 دقائق
 GLOBAL_TEST_SECONDS = 20
-RETRIES = 2
-RETRY_SLEEP = 20
-
 TYPE_CACHE_FILE = "ais_type_cache.json"
 
 WAITING_SPEED_KTS = 0.7
 CONGESTION_RADIUS_KM = 200
 
-# صندوق السعودية: lat 10..32.5 ، lon 32..58.5
-SAUDI_REGION_BOX = [[10.0, 32.0], [32.5, 58.5]]
+# =========================
+# ✅ ممران ساحليان فقط (KSA corridors)
+# =========================
+# البحر الأحمر بمحاذاة سواحل المملكة (يغطي جدة/ينبع/ضباء ويستبعد الأردن/الإمارات)
+RED_SEA_BOX = [[14.0, 32.0], [30.5, 42.5]]   # lat 14..30.5, lon 32..42.5
 
+# الخليج العربي بمحاذاة سواحل المملكة (يغطي الدمام/الجبيل/رأس تنورة ويستبعد خليج عمان)
+ARABIAN_GULF_BOX = [[23.0, 47.0], [29.7, 52.7]]  # lat 23..29.7, lon 47..52.7
+
+# =========================
+# Ports + Oil Terminals (KSA)
+# =========================
 PORTS = {
     # Red Sea
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
@@ -75,62 +81,39 @@ def extract_mmsi(data):
             return str(blk["UserID"])
     return ""
 
-def _in_saudi_box(lat, lon):
-    (a1, o1), (a2, o2) = SAUDI_REGION_BOX
-    return (min(a1,a2) <= lat <= max(a1,a2)) and (min(o1,o2) <= lon <= max(o1,o2))
-
 def extract_lat_lon(data):
-    """
-    Robust lat/lon:
-    - MetaData: latitude/longitude or Latitude/Longitude
-    - Message blocks: Latitude/Longitude
-    - Auto-fix swapped if it looks swapped relative to SAUDI_REGION_BOX
-    """
-    # 1) MetaData
+    # robust keys
     meta = data.get("MetaData") or data.get("Metadata") or {}
     lat = None; lon = None
 
-    for lk in ("latitude", "Latitude", "lat", "LAT"):
+    for lk in ("latitude","Latitude","lat","LAT"):
         if lk in meta:
-            try:
-                lat = float(meta[lk]); break
-            except Exception:
-                pass
-    for ok in ("longitude", "Longitude", "lon", "LON"):
+            try: lat = float(meta[lk]); break
+            except: pass
+    for ok in ("longitude","Longitude","lon","LON","lng","Lng"):
         if ok in meta:
-            try:
-                lon = float(meta[ok]); break
-            except Exception:
-                pass
+            try: lon = float(meta[ok]); break
+            except: pass
 
-    # 2) Message blocks if not found
     if lat is None or lon is None:
         msg = data.get("Message", {})
         for _, blk in msg.items():
-            if isinstance(blk, dict) and ("Latitude" in blk) and ("Longitude" in blk):
+            if isinstance(blk, dict) and "Latitude" in blk and "Longitude" in blk:
                 try:
-                    lat = float(blk["Latitude"])
-                    lon = float(blk["Longitude"])
+                    lat = float(blk["Latitude"]); lon = float(blk["Longitude"])
                     break
-                except Exception:
+                except:
                     pass
 
     if lat is None or lon is None:
         raise KeyError
 
-    # sanity
+    # sanity + swap if needed
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        # maybe swapped or bad
         if (-90 <= lon <= 90 and -180 <= lat <= 180):
             lat, lon = lon, lat
         else:
             raise KeyError
-
-    # 3) auto swap if it clearly looks swapped w.r.t Saudi box
-    # Expected: lat in 10..32.5 and lon in 32..58.5
-    # If swapped: lat falls in lon range and lon falls in lat range
-    if (not _in_saudi_box(lat, lon)) and _in_saudi_box(lon, lat):
-        lat, lon = lon, lat
 
     return lat, lon
 
@@ -175,16 +158,16 @@ def congestion_level(total, waiting):
     return "🟢 منخفض"
 
 def run_stream(boxes, seconds, type_cache):
-    samples_total = 0
-    samples_pos = 0
-    samples_static = 0
     opened = False
     subsent = False
     last_error = None
 
+    samples_total = 0
+    samples_pos = 0
+    samples_static = 0
+
     vessels = {}  # mmsi -> {lat,lon,waiting,type}
 
-    # diagnostics: min/max + nearest-distance buckets
     min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
 
     def on_open(ws):
@@ -204,7 +187,7 @@ def run_stream(boxes, seconds, type_cache):
         samples_total += 1
         try:
             data = json.loads(message)
-        except Exception:
+        except:
             return
 
         mmsi = extract_mmsi(data)
@@ -218,32 +201,29 @@ def run_stream(boxes, seconds, type_cache):
                 vtype = int(data["Message"]["ShipStaticData"].get("Type", 0))
                 if vtype:
                     type_cache[mmsi] = vtype
-            except Exception:
+            except:
                 pass
             return
 
         try:
             lat, lon = extract_lat_lon(data)
-        except Exception:
+        except:
             return
 
         samples_pos += 1
         min_lat = min(min_lat, lat); max_lat = max(max_lat, lat)
         min_lon = min(min_lon, lon); max_lon = max(max_lon, lon)
 
-        vtype = type_cache.get(mmsi, 0)
         vessels[mmsi] = {
             "lat": lat,
             "lon": lon,
             "waiting": is_waiting(data),
-            "type": vtype
+            "type": type_cache.get(mmsi, 0)
         }
 
     ws = websocket.WebSocketApp(
         "wss://stream.aisstream.io/v0/stream",
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error
+        on_open=on_open, on_message=on_message, on_error=on_error
     )
 
     timer = threading.Timer(seconds, lambda: ws.close())
@@ -251,27 +231,21 @@ def run_stream(boxes, seconds, type_cache):
     ws.run_forever(ping_interval=20, ping_timeout=10)
     timer.cancel()
 
-    diag = None
+    win = None
     if samples_pos > 0:
-        diag = f"lat[{min_lat:.4f},{max_lat:.4f}] lon[{min_lon:.4f},{max_lon:.4f}]"
+        win = f"lat[{min_lat:.4f},{max_lat:.4f}] lon[{min_lon:.4f},{max_lon:.4f}]"
 
     return {
-        "opened": opened,
-        "subsent": subsent,
-        "last_error": last_error,
-        "messages": samples_total,
-        "position": samples_pos,
-        "static": samples_static,
-        "vessels": vessels,
-        "latlon_window": diag
+        "opened": opened, "subsent": subsent, "last_error": last_error,
+        "messages": samples_total, "position": samples_pos, "static": samples_static,
+        "vessels": vessels, "latlon_window": win
     }
 
 def compute_ports(vessels):
     ports_now = {k: {"total": 0, "waiting": 0, "tankers": 0} for k in PORTS.keys()}
     near50 = 0
-    near200 = 0
-    # nearest distance distribution
-    d0_50 = 0; d50_200 = 0; d200p = 0
+    nearR = 0
+    b0_50 = 0; b50_R = 0; bRp = 0
 
     for _, v in vessels.items():
         best = 10**9
@@ -286,34 +260,37 @@ def compute_ports(vessels):
                     ports_now[name]["tankers"] += 1
 
         if best <= 50:
-            near50 += 1
-            d0_50 += 1
+            near50 += 1; b0_50 += 1
         elif best <= CONGESTION_RADIUS_KM:
-            near200 += 1
-            d50_200 += 1
+            nearR += 1; b50_R += 1
         else:
-            d200p += 1
+            bRp += 1
 
-    return ports_now, near50, near200, (d0_50, d50_200, d200p)
+    return ports_now, near50, (near50 + nearR), (b0_50, b50_R, bRp)
 
 if __name__ == "__main__":
     type_cache = load_json(TYPE_CACHE_FILE, {})
 
-    regional = None
-    for _ in range(RETRIES):
-        regional = run_stream([SAUDI_REGION_BOX], CAPTURE_SECONDS, type_cache)
-        if regional["messages"] > 0:
-            break
-        time.sleep(RETRY_SLEEP)
+    # ✅ اتصال واحد + صندوقين فقط
+    regional = run_stream([RED_SEA_BOX, ARABIAN_GULF_BOX], CAPTURE_SECONDS, type_cache)
 
-    # global test always
-    global_box = [[-90.0, -180.0], [90.0, 180.0]]
-    glob = run_stream([global_box], GLOBAL_TEST_SECONDS, type_cache)
+    # global test (للتأكد الخدمة شغالة)
+    glob = run_stream([[[-90.0, -180.0], [90.0, 180.0]]], GLOBAL_TEST_SECONDS, type_cache)
 
     save_json(TYPE_CACHE_FILE, type_cache)
 
     vessels = regional["vessels"]
-    ports_now, near50, near200, dist_b = compute_ports(vessels)
+    ports_now, near50, nearR, buckets = compute_ports(vessels)
+
+    # counts by corridor (تقريبًا عبر lat/lon window يكفي تشخيص، بس نضيف عد تقريبي)
+    red_count = 0
+    gulf_count = 0
+    for _, v in vessels.items():
+        lat = v["lat"]; lon = v["lon"]
+        if (RED_SEA_BOX[0][0] <= lat <= RED_SEA_BOX[1][0]) and (RED_SEA_BOX[0][1] <= lon <= RED_SEA_BOX[1][1]):
+            red_count += 1
+        if (ARABIAN_GULF_BOX[0][0] <= lat <= ARABIAN_GULF_BOX[1][0]) and (ARABIAN_GULF_BOX[0][1] <= lon <= ARABIAN_GULF_BOX[1][1]):
+            gulf_count += 1
 
     ranked = sorted(ports_now.items(), key=lambda x: (x[1]["waiting"], x[1]["total"]), reverse=True)
 
@@ -325,19 +302,18 @@ if __name__ == "__main__":
             f"• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}"
         )
 
-    note = ""
-    if regional["messages"] == 0 and glob["messages"] > 0:
-        note = "⚠️ AISStream شغال عالميًا لكن لم يرسل دفقًا داخل نطاق السعودية في هذه النافذة (تغطية/Throttle)."
-
-    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Fixed Lat/Lon)
+    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (KSA Coastal Corridors)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📡 إقليمي (السعودية):
+📡 إقليمي (Red Sea + Gulf):
 • messages: {regional['messages']} | position: {regional['position']} | static: {regional['static']}
 • vessels unique: {len(vessels)}
-• قرب الموانئ: <=50كم={near50} | <= {CONGESTION_RADIUS_KM}كم={near200}
-• nearest dist buckets: 0-50={dist_b[0]}, 50-200={dist_b[1]}, >200={dist_b[2]}
+• corridor counts (approx): RedSea={red_count}, Gulf={gulf_count}
+
+📍 قرب موانئ/محطات المملكة:
+• <=50كم={near50} | <= {CONGESTION_RADIUS_KM}كم={nearR}
+• nearest dist buckets: 0-50={buckets[0]}, 50-{CONGESTION_RADIUS_KM}={buckets[1]}, >{CONGESTION_RADIUS_KM}={buckets[2]}
 • lat/lon window: {regional['latlon_window'] or 'N/A'}
 
 🌍 اختبار عالمي ({GLOBAL_TEST_SECONDS}s):
@@ -347,7 +323,6 @@ if __name__ == "__main__":
 • opened: {regional['opened']} | subscription_sent: {regional['subsent']}
 • last_error: {regional['last_error'] or 'N/A'}
 
-{note}
 ════════════════════
 """ + "\n\n".join(lines)
 
