@@ -1,8 +1,8 @@
 import os
 import json
+import math
 import threading
 import datetime
-import time
 import requests
 import websocket
 
@@ -13,37 +13,50 @@ API_KEY = os.environ["AISSTREAM_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
-CAPTURE_SECONDS = 180  # 3 minutes each hourly run
+CAPTURE_SECONDS = 180  # نافذة الالتقاط (ثواني)
 
 # =========================
-# Areas
+# Saudi Ports + Oil Terminals
 # =========================
-RED_SEA_BOXES = [
-    [[12.0, 41.0], [29.8, 44.5]]
-]
-GULF_BOXES = [
-    [[22.0, 47.0], [31.5, 57.0]]
-]
-ALL_BOXES = RED_SEA_BOXES + GULF_BOXES
+# radius_km: نصف قطر الرصد حول الموقع (للازدحام قرب الميناء/المحطة)
+PORTS = {
+    # =======================
+    # موانئ البحر الأحمر
+    # =======================
+    "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173, "radius_km": 18},
+    "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089, "radius_km": 18},
+    "ميناء ينبع التجاري": {"lat": 24.0665, "lon": 38.0675, "radius_km": 16},
+    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573, "radius_km": 16},
+    "ميناء ضباء": {"lat": 27.5606, "lon": 35.5440, "radius_km": 14},
+
+    # =======================
+    # موانئ الخليج العربي
+    # =======================
+    "ميناء الملك عبدالعزيز (الدمام)": {"lat": 26.4410, "lon": 50.1485, "radius_km": 20},
+    "ميناء الجبيل التجاري": {"lat": 27.0241, "lon": 49.6793, "radius_km": 20},
+
+    # =======================
+    # محطات النفط (Oil Terminals)
+    # =======================
+    # رأس تنورة (Port of Ras Tanura / حدود الميناء ضمن كتيب أرامكو)  [oai_citation:1‡Aramco](https://www.aramco.com/-/media/downloads/working-with-us/ports-and-terminals-july-2025/03--ras-tanura-port--si--np-compressed.pdf?utm_source=chatgpt.com)
+    "محطة نفط رأس تنورة": {"lat": 26.6726, "lon": 50.1219, "radius_km": 24},  # نقطة تمثيلية قرب منطقة الميناء/التيرمنال
+
+    # الجعيمة (Juaymah Terminal)  [oai_citation:2‡MagicPort](https://magicport.ai/ports/saudi-arabia/juaymah-terminal-port-sajut?utm_source=chatgpt.com)
+    "محطة نفط الجعيمة (Juaymah)": {"lat": 26.93, "lon": 50.06, "radius_km": 26},
+
+    # تناجيب (Tanajib Port)  [oai_citation:3‡vesselfinder.com](https://www.vesselfinder.com/ports/SATNJ001?utm_source=chatgpt.com)
+    "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921, "radius_km": 26},
+}
 
 # =========================
-# Files (persist in repo workspace)
+# Persistence (delta + alerts)
 # =========================
+STATE_FILE = "ais_ports_state.json"
 TYPE_CACHE_FILE = "ais_type_cache.json"
-STATE_FILE = "ais_state.json"
 
-# =========================
-# Thresholds (tweak anytime)
-# =========================
-SPIKE_SHIPS_DELTA = 25         # if total ships jump by >= 25 vs last run -> alert
-SPIKE_TANKERS_DELTA = 6        # if oil tankers jump by >= 6 -> alert
-
-def send_telegram(text: str):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text},
-        timeout=20
-    )
+# تنبيه ازدحام/تصاعد
+ALERT_WAITING_SPIKE = 8   # إذا زاد المنتظرون في ميناء واحد مقارنة بالتشغيل السابق
+WAITING_SPEED_KTS = 0.7   # أقل = غالباً انتظار/رسو
 
 def load_json(path, default):
     try:
@@ -59,23 +72,21 @@ def save_json(path, obj):
     except Exception:
         pass
 
-def normalize_box(box):
-    (lat1, lon1), (lat2, lon2) = box
-    return min(lat1, lat2), max(lat1, lat2), min(lon1, lon2), max(lon1, lon2)
+def send_telegram(text: str):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": text},
+        timeout=25
+    )
 
-def in_box(lat, lon, box):
-    a, b, c, d = normalize_box(box)
-    return a <= lat <= b and c <= lon <= d
-
-def in_any(lat, lon, boxes):
-    return any(in_box(lat, lon, b) for b in boxes)
-
-def is_oil_tanker(vtype):
-    try:
-        v = int(vtype)
-    except Exception:
-        v = 0
-    return 80 <= v <= 89
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
 
 def extract_mmsi(data):
     meta = data.get("MetaData") or data.get("Metadata") or {}
@@ -84,7 +95,7 @@ def extract_mmsi(data):
         return str(m)
 
     msg = data.get("Message", {})
-    for k, blk in msg.items():
+    for _, blk in msg.items():
         if isinstance(blk, dict) and "UserID" in blk:
             return str(blk["UserID"])
     return ""
@@ -96,57 +107,86 @@ def extract_lat_lon_and_block(data):
             return float(blk["Latitude"]), float(blk["Longitude"]), blk
     raise KeyError
 
-def calculate_risk(gulf_count, red_count, oil_total):
-    risk = 0
+def get_sog_knots(blk: dict):
+    for k in ("Sog", "SOG", "SpeedOverGround", "Speed"):
+        if k in blk:
+            try:
+                return float(blk[k])
+            except Exception:
+                pass
+    return None
 
-    # 1) Gulf traffic weight
-    if gulf_count > 60:
-        risk += 45
-    elif gulf_count > 30:
-        risk += 30
-    else:
-        risk += 15
+def get_nav_status(blk: dict):
+    for k in ("NavigationalStatus", "NavStatus", "NavigationStatus"):
+        if k in blk:
+            try:
+                return int(blk[k])
+            except Exception:
+                pass
+    return None
 
-    # 2) Oil tankers weight
-    risk += min(oil_total * 6, 35)
+def is_waiting(blk: dict):
+    sog = get_sog_knots(blk)
+    nav = get_nav_status(blk)
+    # شائع: 1=Anchored, 5=Moored
+    if nav in (1, 5):
+        return True
+    if sog is not None and sog <= WAITING_SPEED_KTS:
+        return True
+    return False
 
-    # 3) Red Sea coverage penalty (awareness)
-    if red_count == 0:
-        risk += 10
+def is_oil_tanker(vtype):
+    try:
+        v = int(vtype)
+    except Exception:
+        v = 0
+    return 80 <= v <= 89
 
-    risk = min(risk, 100)
+def compute_congestion(vessels):
+    ports_out = {}
+    for pname, p in PORTS.items():
+        total = 0
+        waiting = 0
+        tankers = 0
+        for _, v in vessels.items():
+            d = haversine_km(p["lat"], p["lon"], v["lat"], v["lon"])
+            if d <= p["radius_km"]:
+                total += 1
+                if v["waiting"]:
+                    waiting += 1
+                if is_oil_tanker(v.get("type", 0)):
+                    tankers += 1
+        ports_out[pname] = {"total": total, "waiting": waiting, "tankers": tankers}
+    return ports_out
 
-    if risk >= 70:
-        level = "🔴 مرتفع"
-    elif risk >= 40:
-        level = "🟠 متوسط"
-    else:
-        level = "🟢 منخفض"
-
-    return risk, level
+def congestion_level(total, waiting):
+    if waiting >= 15 or total >= 50:
+        return "🔴 شديد"
+    if waiting >= 7 or total >= 25:
+        return "🟠 مرتفع"
+    if waiting >= 3 or total >= 10:
+        return "🟡 متوسط"
+    return "🟢 منخفض"
 
 def run_capture():
-    # persistent type cache
-    mmsi_to_type = load_json(TYPE_CACHE_FILE, {})
-    # runtime sets
-    seen_red, seen_gulf = set(), set()
-    oil_red, oil_gulf = set(), set()
+    type_cache = load_json(TYPE_CACHE_FILE, {})  # mmsi -> type
+    vessels = {}  # mmsi -> {lat,lon,waiting,type}
 
     samples_total = 0
     samples_pos = 0
     samples_static = 0
 
     def on_open(ws):
+        # نفتح عالمي لتحسين فرصة التقاط الموانئ/المحطات (التغطية تختلف)
         ws.send(json.dumps({
             "APIKey": API_KEY,
-            "BoundingBoxes": ALL_BOXES
+            "BoundingBoxes": [[[-90.0, -180.0], [90.0, 180.0]]]
         }))
 
     def on_message(ws, message):
         nonlocal samples_total, samples_pos, samples_static
         samples_total += 1
 
-        # ignore non-json
         try:
             data = json.loads(message)
         except Exception:
@@ -158,18 +198,16 @@ def run_capture():
 
         mt = data.get("MessageType")
 
-        # Ship static -> cache type
         if mt == "ShipStaticData":
             samples_static += 1
             try:
                 vtype = int(data["Message"]["ShipStaticData"].get("Type", 0))
                 if vtype:
-                    mmsi_to_type[mmsi] = vtype
+                    type_cache[mmsi] = vtype
             except Exception:
                 pass
             return
 
-        # Position-like (anything with lat/lon)
         try:
             lat, lon, blk = extract_lat_lon_and_block(data)
         except Exception:
@@ -177,20 +215,22 @@ def run_capture():
 
         samples_pos += 1
 
-        # type may be inside blk, otherwise from cache
-        vtype = blk.get("Type", 0)
-        if not vtype:
-            vtype = mmsi_to_type.get(mmsi, 0)
+        # فلترة محلية: نخلي فقط اللي قريب من أي ميناء/محطة (radius + margin)
+        near_any = False
+        for p in PORTS.values():
+            if haversine_km(p["lat"], p["lon"], lat, lon) <= (p["radius_km"] + 5):
+                near_any = True
+                break
+        if not near_any:
+            return
 
-        if in_any(lat, lon, RED_SEA_BOXES):
-            seen_red.add(mmsi)
-            if is_oil_tanker(vtype):
-                oil_red.add(mmsi)
-
-        if in_any(lat, lon, GULF_BOXES):
-            seen_gulf.add(mmsi)
-            if is_oil_tanker(vtype):
-                oil_gulf.add(mmsi)
+        vtype = blk.get("Type", 0) or type_cache.get(mmsi, 0)
+        vessels[mmsi] = {
+            "lat": lat,
+            "lon": lon,
+            "waiting": is_waiting(blk),
+            "type": vtype,
+        }
 
     ws = websocket.WebSocketApp(
         "wss://stream.aisstream.io/v0/stream",
@@ -203,89 +243,59 @@ def run_capture():
     ws.run_forever(ping_interval=20, ping_timeout=10)
     timer.cancel()
 
-    # save cache
-    save_json(TYPE_CACHE_FILE, mmsi_to_type)
-
-    return {
-        "samples_total": samples_total,
-        "samples_pos": samples_pos,
-        "samples_static": samples_static,
-        "red": seen_red,
-        "gulf": seen_gulf,
-        "oil_red": oil_red,
-        "oil_gulf": oil_gulf
-    }
+    save_json(TYPE_CACHE_FILE, type_cache)
+    return samples_total, samples_pos, samples_static, vessels
 
 if __name__ == "__main__":
-    res = run_capture()
+    prev_state = load_json(STATE_FILE, {"ports": {}, "ts": ""})
 
-    red_count = len(res["red"])
-    gulf_count = len(res["gulf"])
-    oil_total = len(res["oil_red"]) + len(res["oil_gulf"])
+    total, pos, stat, vessels = run_capture()
+    ports_now = compute_congestion(vessels)
 
-    risk, level = calculate_risk(gulf_count, red_count, oil_total)
+    ranked = sorted(
+        ports_now.items(),
+        key=lambda x: (x[1]["waiting"], x[1]["total"]),
+        reverse=True
+    )
 
-    # load previous state to compute deltas + alerts
-    prev = load_json(STATE_FILE, {
-        "gulf_count": 0,
-        "red_count": 0,
-        "oil_total": 0,
-        "risk": 0,
-        "ts": ""
-    })
+    lines = []
+    alerts = []
 
-    d_gulf = gulf_count - int(prev.get("gulf_count", 0))
-    d_red = red_count - int(prev.get("red_count", 0))
-    d_oil = oil_total - int(prev.get("oil_total", 0))
-    d_risk = risk - int(prev.get("risk", 0))
+    for pname, v in ranked:
+        lvl = congestion_level(v["total"], v["waiting"])
+        prev = (prev_state.get("ports", {}).get(pname) or {})
+        d_wait = v["waiting"] - int(prev.get("waiting", 0))
+        d_total = v["total"] - int(prev.get("total", 0))
 
-    # save current state
-    save_json(STATE_FILE, {
-        "gulf_count": gulf_count,
-        "red_count": red_count,
-        "oil_total": oil_total,
-        "risk": risk,
-        "ts": now.strftime("%Y-%m-%d %H:%M")
-    })
+        lines.append(
+            f"{lvl} {pname}\n"
+            f"• إجمالي: {v['total']} (Δ {d_total:+}) | منتظرة/راسية: {v['waiting']} (Δ {d_wait:+}) | ناقلات: {v['tankers']}"
+        )
 
-    # human-friendly Red Sea status
-    if red_count == 0:
-        red_text = "⚠️ تغطية AIS ضعيفة"
-    else:
-        red_text = str(red_count)
+        if d_wait >= ALERT_WAITING_SPIKE and v["waiting"] >= 5:
+            alerts.append(f"🚨 ازدحام متصاعد في {pname}: +{d_wait} سفن منتظرة")
 
-    # main report
-    msg = f"""🚢 تقرير الحركة البحرية الذكي (CCC)
+    save_json(STATE_FILE, {"ports": ports_now, "ts": now.strftime("%Y-%m-%d %H:%M")})
+
+    header = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📡 الرسائل: {res['samples_total']}
-📍 Position: {res['samples_pos']} | Static: {res['samples_static']}
+📡 رسائل: {total}
+📍 Position: {pos} | Static: {stat}
 
-📊 السفن:
-• البحر الأحمر: {red_text} (Δ {d_red:+})
-• الخليج العربي: {gulf_count} (Δ {d_gulf:+})
-
-🛢️ ناقلات النفط (80–89):
-• الإجمالي: {oil_total} (Δ {d_oil:+})
-
+📌 ملاحظة:
+• التغطية تعتمد على توفر بث AIS قرب كل موقع.
 ════════════════════
-📊 مؤشر المخاطر البحري:
-{risk}/100 — {level} (Δ {d_risk:+})
-
-📌 تفسير سريع:
-• كثافة الخليج + ناقلات النفط + حالة تغطية البحر الأحمر.
 """
 
-    send_telegram(msg)
+    body = "\n\n".join(lines[:15]) if lines else "لا توجد بيانات قرب الموانئ/المحطات ضمن نافذة الالتقاط."
 
-    # alerts (separate message only when needed)
-    spike_alerts = []
-    if d_gulf >= SPIKE_SHIPS_DELTA:
-        spike_alerts.append(f"🚨 ارتفاع مفاجئ في سفن الخليج: +{d_gulf}")
-    if d_oil >= SPIKE_TANKERS_DELTA:
-        spike_alerts.append(f"🛢️ زيادة ناقلات النفط: +{d_oil}")
+    send_telegram(header + body)
 
-    if spike_alerts:
-        alert_msg = "🚨 تنبيه بحري (Early Warning)\n" + "\n".join(spike_alerts) + f"\n🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA"
-        send_telegram(alert_msg)
+    if alerts:
+        send_telegram(
+            "🚨 تنبيهات ازدحام (Port Congestion)\n"
+            + "\n".join(alerts)
+            + f"\n🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA"
+        )
