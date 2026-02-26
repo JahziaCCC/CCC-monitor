@@ -31,12 +31,13 @@ RETRY_ON_ZERO = 1
 GLOBAL_TEST_SECONDS = 20
 
 # =========================
-# FINAL STABLE BOXES
+# RED SEA SHIPPING LANES (FINAL)
 # =========================
-
-# البحر الأحمر (الساحل السعودي كامل)
 RED_SEA_BOXES = [
-    [[12.0, 32.0], [30.0, 44.5]]
+    [[12.0, 41.0], [15.5, 44.5]],   # باب المندب
+    [[18.0, 37.5], [22.8, 41.5]],   # جدة
+    [[22.5, 36.0], [25.8, 39.8]],   # ينبع
+    [[25.5, 34.0], [29.8, 37.8]],   # نيوم
 ]
 
 # الخليج العربي
@@ -103,7 +104,7 @@ def extract_lat_lon_any(data):
     raise KeyError("No lat/lon")
 
 # =========================
-# Capture function
+# Capture
 # =========================
 def run_capture(boxes, seconds):
 
