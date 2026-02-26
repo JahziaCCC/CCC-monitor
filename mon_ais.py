@@ -17,21 +17,15 @@ CONGESTION_RADIUS_KM = 250
 
 SAUDI_BIG_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
-# =========================
 # KSA-only (tight)
-# =========================
 KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]
 KSA_GULF    = [[24.0, 48.4], [28.9, 52.6]]
 
-# =========================
 # Regional corridors (wider)
-# =========================
 REG_RED_SEA = [[12.0, 32.0], [30.5, 44.8]]
 REG_GULF    = [[21.0, 47.0], [30.5, 56.5]]
 
-# =========================
-# KSA Ports + Oil Terminals
-# =========================
+# KSA ports
 PORTS_KSA = {
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
@@ -45,22 +39,16 @@ PORTS_KSA = {
     "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
 }
 
-# =========================
-# Regional Ports (fallback when KSA coverage=0)
-# (إحداثيات تقريبية كافية للتصنيف التشغيلي)
-# =========================
+# Regional ports (fallback)
 PORTS_REGIONAL = {
-    # UAE
-    "ميناء جبل علي (دبي)": {"lat": 24.985, "lon": 55.060},
     "ميناء راشد (دبي)": {"lat": 25.270, "lon": 55.275},
+    "ميناء جبل علي (دبي)": {"lat": 24.985, "lon": 55.060},
     "ميناء خورفكان": {"lat": 25.340, "lon": 56.360},
     "ميناء الفجيرة": {"lat": 25.120, "lon": 56.330},
     "ميناء أبوظبي (خليفة)": {"lat": 24.810, "lon": 54.610},
-    # Qatar / Bahrain / Kuwait
     "ميناء حمد (قطر)": {"lat": 25.070, "lon": 51.610},
     "ميناء سلمان (البحرين)": {"lat": 26.150, "lon": 50.620},
     "ميناء الشويخ (الكويت)": {"lat": 29.360, "lon": 47.950},
-    # Oman (north)
     "ميناء صحار": {"lat": 24.490, "lon": 56.620},
 }
 
@@ -182,7 +170,6 @@ def run_stream(boxes, seconds, type_cache):
 
     vessels = {}
     points = []
-
     min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
 
     def on_open(ws):
@@ -259,9 +246,9 @@ def run_stream(boxes, seconds, type_cache):
         "vessels": vessels, "latlon_window": win, "sample_points": points
     }
 
-def compute_nearest_ports(vessels, ports, topn=5):
-    # returns list of (port_name, count_within_R, waiting, tankers, min_dist)
-    stats = {k: {"total": 0, "waiting": 0, "tankers": 0, "min_d": 10**9} for k in ports.keys()}
+def compute_port_stats(vessels, ports, topn=7):
+    # For each vessel: assign nearest port (even if far), and count those within radius
+    stats = {k: {"within": 0, "waiting": 0, "tankers_conf": 0, "type_unknown": 0, "min_d": None} for k in ports.keys()}
 
     for _, v in vessels.items():
         best_name = None
@@ -275,24 +262,27 @@ def compute_nearest_ports(vessels, ports, topn=5):
         if best_name is None:
             continue
 
-        # track min distance even if outside radius
-        stats[best_name]["min_d"] = min(stats[best_name]["min_d"], best_d)
+        # track min distance always
+        cur = stats[best_name]["min_d"]
+        stats[best_name]["min_d"] = best_d if (cur is None or best_d < cur) else cur
 
         if best_d <= CONGESTION_RADIUS_KM:
-            stats[best_name]["total"] += 1
+            stats[best_name]["within"] += 1
             if v["waiting"]:
                 stats[best_name]["waiting"] += 1
-            if is_oil_tanker(v.get("type", 0)):
-                stats[best_name]["tankers"] += 1
 
-    ranked = sorted(stats.items(), key=lambda x: (x[1]["total"], x[1]["waiting"]), reverse=True)
-    out = []
-    for name, s in ranked[:topn]:
-        out.append((name, s["total"], s["waiting"], s["tankers"], s["min_d"]))
-    return out
+            t = v.get("type", 0)
+            if t == 0:
+                stats[best_name]["type_unknown"] += 1
+            elif is_oil_tanker(t):
+                stats[best_name]["tankers_conf"] += 1
+
+    # Only show ports that have any signal: within>0 OR min_d not None
+    usable = [(name, s) for name, s in stats.items() if s["min_d"] is not None]
+    ranked = sorted(usable, key=lambda x: (x[1]["within"], x[1]["waiting"]), reverse=True)[:topn]
+    return ranked
 
 def hotspots(vessels, cell_deg=0.5, topn=5):
-    # grid by rounding to 0.5deg
     grid = defaultdict(int)
     for _, v in vessels.items():
         lat = round(v["lat"]/cell_deg)*cell_deg
@@ -316,34 +306,42 @@ if __name__ == "__main__":
 
     used_label = "KSA-only"
     used_v = ksa_v
-    ports_used = PORTS_KSA
+    used_ports = PORTS_KSA
 
-    coverage_note = ""
+    note = ""
     if len(ksa_v) == 0:
         used_label = "Regional (no KSA coastal coverage)"
         used_v = reg_v
-        ports_used = PORTS_REGIONAL
-        coverage_note = "⚠️ لا توجد تغطية AIS قرب سواحل المملكة في هذه النافذة — تم عرض أقرب الموانئ الإقليمية + نقاط الكثافة بدل أصفار موانئ السعودية."
+        used_ports = PORTS_REGIONAL
+        note = "⚠️ لا توجد تغطية AIS قرب سواحل المملكة في هذه النافذة — تم التحويل تلقائيًا لعرض موانئ إقليمية + نقاط كثافة."
 
-    # nearest ports summary
-    near_ports = compute_nearest_ports(used_v, ports_used, topn=7)
-
-    # hotspots summary
+    port_rank = compute_port_stats(used_v, used_ports, topn=7)
     hot = hotspots(used_v, cell_deg=0.5, topn=7)
 
-    # sample points (global stream sample)
     pts = regional["sample_points"]
     pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
 
     ports_lines = []
-    for name, total, waiting, tankers, mind in near_ports:
-        ports_lines.append(f"• {name}: ضمن {CONGESTION_RADIUS_KM}كم = {total} | منتظرة/راسية {waiting} | ناقلات {tankers} | أقرب مسافة ~{mind:.0f}كم")
+    for name, s in port_rank:
+        within = s["within"]
+        waiting = s["waiting"]
+        tank_conf = s["tankers_conf"]
+        unk = s["type_unknown"]
+        mind = s["min_d"] if s["min_d"] is not None else 10**9
+
+        # Only show meaningful lines (within>0 OR mind within 400km)
+        if within == 0 and mind > 400:
+            continue
+
+        ports_lines.append(
+            f"• {name}: ضمن {CONGESTION_RADIUS_KM}كم = {within} | منتظرة/راسية {waiting} | ناقلات مؤكدة {tank_conf} | نوع غير معروف {unk} | أقرب مسافة ~{mind:.0f}كم"
+        )
 
     hot_lines = []
     for (lat, lon), cnt in hot:
         hot_lines.append(f"• خلية lat={lat:.1f}, lon={lon:.1f} : {cnt} سفينة")
 
-    msg = f"""🚢 تقرير الملاحة (موانئ + محطات نفط) — KSA/Regional Smart
+    msg = f"""🚢 تقرير الملاحة (موانئ + محطات نفط) — Smart Clean
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
@@ -355,11 +353,11 @@ if __name__ == "__main__":
 🇸🇦 KSA-only vessels: {len(ksa_v)}
 🌐 Regional vessels: {len(reg_v)}
 📍 الحساب المستخدم: {used_label}
-{coverage_note}
+{note}
 
 ════════════════════
-⚓ أقرب الموانئ/المحطات (حسب المجموعة المستخدمة):
-""" + ("\n".join(ports_lines) if ports_lines else "• لا يوجد") + f"""
+⚓ أقرب الموانئ/المحطات (منطق نظيف):
+""" + ("\n".join(ports_lines) if ports_lines else "• لا يوجد ضمن نطاقات مفيدة") + f"""
 
 ════════════════════
 🔥 نقاط كثافة (Hotspots):
