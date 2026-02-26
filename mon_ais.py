@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import datetime
+import time
 import requests
 import websocket
 
@@ -12,71 +13,128 @@ API_KEY = os.environ["AISSTREAM_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
-CAPTURE_SECONDS = 180
+CAPTURE_SECONDS = 180  # 3 minutes each hourly run
 
 # =========================
-# AREAS
+# Areas
 # =========================
 RED_SEA_BOXES = [
     [[12.0, 41.0], [29.8, 44.5]]
 ]
-
 GULF_BOXES = [
     [[22.0, 47.0], [31.5, 57.0]]
 ]
-
 ALL_BOXES = RED_SEA_BOXES + GULF_BOXES
 
-def normalize_box(box):
-    (lat1, lon1), (lat2, lon2) = box
-    return min(lat1,lat2), max(lat1,lat2), min(lon1,lon2), max(lon1,lon2)
+# =========================
+# Files (persist in repo workspace)
+# =========================
+TYPE_CACHE_FILE = "ais_type_cache.json"
+STATE_FILE = "ais_state.json"
 
-def in_box(lat, lon, box):
-    a,b,c,d = normalize_box(box)
-    return a <= lat <= b and c <= lon <= d
+# =========================
+# Thresholds (tweak anytime)
+# =========================
+SPIKE_SHIPS_DELTA = 25         # if total ships jump by >= 25 vs last run -> alert
+SPIKE_TANKERS_DELTA = 6        # if oil tankers jump by >= 6 -> alert
 
-def in_any(lat, lon, boxes):
-    return any(in_box(lat,lon,b) for b in boxes)
-
-def send_telegram(text):
+def send_telegram(text: str):
     requests.post(
         f"https://api.telegram.org/bot{BOT}/sendMessage",
         json={"chat_id": CHAT_ID, "text": text},
         timeout=20
     )
 
-def extract_mmsi(data):
-    meta = data.get("MetaData") or {}
-    return str(meta.get("MMSI",""))
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
-def extract_latlon(data):
-    msg = data.get("Message", {})
-    for _, blk in msg.items():
-        if isinstance(blk, dict):
-            if "Latitude" in blk and "Longitude" in blk:
-                return float(blk["Latitude"]), float(blk["Longitude"]), blk
-    raise KeyError
+def save_json(path, obj):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def normalize_box(box):
+    (lat1, lon1), (lat2, lon2) = box
+    return min(lat1, lat2), max(lat1, lat2), min(lon1, lon2), max(lon1, lon2)
+
+def in_box(lat, lon, box):
+    a, b, c, d = normalize_box(box)
+    return a <= lat <= b and c <= lon <= d
+
+def in_any(lat, lon, boxes):
+    return any(in_box(lat, lon, b) for b in boxes)
 
 def is_oil_tanker(vtype):
     try:
         v = int(vtype)
-    except:
+    except Exception:
         v = 0
     return 80 <= v <= 89
 
-# =========================
-# MAIN CAPTURE
-# =========================
+def extract_mmsi(data):
+    meta = data.get("MetaData") or data.get("Metadata") or {}
+    m = meta.get("MMSI") or meta.get("mmsi")
+    if m:
+        return str(m)
+
+    msg = data.get("Message", {})
+    for k, blk in msg.items():
+        if isinstance(blk, dict) and "UserID" in blk:
+            return str(blk["UserID"])
+    return ""
+
+def extract_lat_lon_and_block(data):
+    msg = data.get("Message", {})
+    for _, blk in msg.items():
+        if isinstance(blk, dict) and ("Latitude" in blk) and ("Longitude" in blk):
+            return float(blk["Latitude"]), float(blk["Longitude"]), blk
+    raise KeyError
+
+def calculate_risk(gulf_count, red_count, oil_total):
+    risk = 0
+
+    # 1) Gulf traffic weight
+    if gulf_count > 60:
+        risk += 45
+    elif gulf_count > 30:
+        risk += 30
+    else:
+        risk += 15
+
+    # 2) Oil tankers weight
+    risk += min(oil_total * 6, 35)
+
+    # 3) Red Sea coverage penalty (awareness)
+    if red_count == 0:
+        risk += 10
+
+    risk = min(risk, 100)
+
+    if risk >= 70:
+        level = "🔴 مرتفع"
+    elif risk >= 40:
+        level = "🟠 متوسط"
+    else:
+        level = "🟢 منخفض"
+
+    return risk, level
+
 def run_capture():
-
-    seen_red = set()
-    seen_gulf = set()
-
-    oil_red = set()
-    oil_gulf = set()
+    # persistent type cache
+    mmsi_to_type = load_json(TYPE_CACHE_FILE, {})
+    # runtime sets
+    seen_red, seen_gulf = set(), set()
+    oil_red, oil_gulf = set(), set()
 
     samples_total = 0
     samples_pos = 0
+    samples_static = 0
 
     def on_open(ws):
         ws.send(json.dumps({
@@ -85,20 +143,44 @@ def run_capture():
         }))
 
     def on_message(ws, message):
-        nonlocal samples_total, samples_pos
-
+        nonlocal samples_total, samples_pos, samples_static
         samples_total += 1
 
+        # ignore non-json
         try:
             data = json.loads(message)
-            lat, lon, blk = extract_latlon(data)
-            mmsi = extract_mmsi(data)
-        except:
+        except Exception:
+            return
+
+        mmsi = extract_mmsi(data)
+        if not mmsi:
+            return
+
+        mt = data.get("MessageType")
+
+        # Ship static -> cache type
+        if mt == "ShipStaticData":
+            samples_static += 1
+            try:
+                vtype = int(data["Message"]["ShipStaticData"].get("Type", 0))
+                if vtype:
+                    mmsi_to_type[mmsi] = vtype
+            except Exception:
+                pass
+            return
+
+        # Position-like (anything with lat/lon)
+        try:
+            lat, lon, blk = extract_lat_lon_and_block(data)
+        except Exception:
             return
 
         samples_pos += 1
 
-        vtype = blk.get("Type",0)
+        # type may be inside blk, otherwise from cache
+        vtype = blk.get("Type", 0)
+        if not vtype:
+            vtype = mmsi_to_type.get(mmsi, 0)
 
         if in_any(lat, lon, RED_SEA_BOXES):
             seen_red.add(mmsi)
@@ -118,84 +200,92 @@ def run_capture():
 
     timer = threading.Timer(CAPTURE_SECONDS, lambda: ws.close())
     timer.start()
-    ws.run_forever()
+    ws.run_forever(ping_interval=20, ping_timeout=10)
     timer.cancel()
 
-    return samples_total, samples_pos, seen_red, seen_gulf, oil_red, oil_gulf
+    # save cache
+    save_json(TYPE_CACHE_FILE, mmsi_to_type)
 
-# =========================
-# RISK INDEX
-# =========================
-def calculate_risk(gulf_count, red_count, oil_total):
+    return {
+        "samples_total": samples_total,
+        "samples_pos": samples_pos,
+        "samples_static": samples_static,
+        "red": seen_red,
+        "gulf": seen_gulf,
+        "oil_red": oil_red,
+        "oil_gulf": oil_gulf
+    }
 
-    risk = 0
-
-    # كثافة حركة الخليج
-    if gulf_count > 50:
-        risk += 40
-    elif gulf_count > 20:
-        risk += 25
-    else:
-        risk += 10
-
-    # ناقلات النفط
-    risk += min(oil_total * 5, 30)
-
-    # غياب البحر الأحمر
-    if red_count == 0:
-        risk += 10
-
-    # سقف
-    risk = min(risk, 100)
-
-    if risk >= 70:
-        level = "🔴 مرتفع"
-    elif risk >= 40:
-        level = "🟠 متوسط"
-    else:
-        level = "🟢 منخفض"
-
-    return risk, level
-
-# =========================
-# RUN
-# =========================
 if __name__ == "__main__":
+    res = run_capture()
 
-    total, pos, red, gulf, oil_red, oil_gulf = run_capture()
+    red_count = len(res["red"])
+    gulf_count = len(res["gulf"])
+    oil_total = len(res["oil_red"]) + len(res["oil_gulf"])
 
-    oil_total = len(oil_red) + len(oil_gulf)
+    risk, level = calculate_risk(gulf_count, red_count, oil_total)
 
-    risk, level = calculate_risk(
-        len(gulf),
-        len(red),
-        oil_total
-    )
+    # load previous state to compute deltas + alerts
+    prev = load_json(STATE_FILE, {
+        "gulf_count": 0,
+        "red_count": 0,
+        "oil_total": 0,
+        "risk": 0,
+        "ts": ""
+    })
 
-    red_text = str(len(red))
-    if len(red) == 0:
+    d_gulf = gulf_count - int(prev.get("gulf_count", 0))
+    d_red = red_count - int(prev.get("red_count", 0))
+    d_oil = oil_total - int(prev.get("oil_total", 0))
+    d_risk = risk - int(prev.get("risk", 0))
+
+    # save current state
+    save_json(STATE_FILE, {
+        "gulf_count": gulf_count,
+        "red_count": red_count,
+        "oil_total": oil_total,
+        "risk": risk,
+        "ts": now.strftime("%Y-%m-%d %H:%M")
+    })
+
+    # human-friendly Red Sea status
+    if red_count == 0:
         red_text = "⚠️ تغطية AIS ضعيفة"
+    else:
+        red_text = str(red_count)
 
-    msg = f"""🚢 تقرير الحركة البحرية الذكي
+    # main report
+    msg = f"""🚢 تقرير الحركة البحرية الذكي (CCC)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📡 الرسائل: {total}
-📍 Position: {pos}
+📡 الرسائل: {res['samples_total']}
+📍 Position: {res['samples_pos']} | Static: {res['samples_static']}
 
 📊 السفن:
-• البحر الأحمر: {red_text}
-• الخليج العربي: {len(gulf)}
+• البحر الأحمر: {red_text} (Δ {d_red:+})
+• الخليج العربي: {gulf_count} (Δ {d_gulf:+})
 
-🛢️ ناقلات النفط:
-• الإجمالي: {oil_total}
+🛢️ ناقلات النفط (80–89):
+• الإجمالي: {oil_total} (Δ {d_oil:+})
 
 ════════════════════
 📊 مؤشر المخاطر البحري:
-{risk}/100 — {level}
+{risk}/100 — {level} (Δ {d_risk:+})
 
 📌 تفسير سريع:
-• يعتمد على كثافة الحركة + ناقلات النفط + حالة التغطية.
+• كثافة الخليج + ناقلات النفط + حالة تغطية البحر الأحمر.
 """
 
     send_telegram(msg)
+
+    # alerts (separate message only when needed)
+    spike_alerts = []
+    if d_gulf >= SPIKE_SHIPS_DELTA:
+        spike_alerts.append(f"🚨 ارتفاع مفاجئ في سفن الخليج: +{d_gulf}")
+    if d_oil >= SPIKE_TANKERS_DELTA:
+        spike_alerts.append(f"🛢️ زيادة ناقلات النفط: +{d_oil}")
+
+    if spike_alerts:
+        alert_msg = "🚨 تنبيه بحري (Early Warning)\n" + "\n".join(spike_alerts) + f"\n🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA"
+        send_telegram(alert_msg)
