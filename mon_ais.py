@@ -1,5 +1,4 @@
 import os, json, math, threading, datetime, requests, websocket
-from collections import defaultdict
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -9,119 +8,76 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 now = datetime.datetime.now(KSA_TZ)
 
 CAPTURE_SECONDS = 600
-GLOBAL_TEST_SECONDS = 20
-TYPE_CACHE_FILE = "ais_type_cache.json"
-
 WAITING_SPEED_KTS = 0.7
-CONGESTION_RADIUS_KM = 250
+PORT_RADIUS_KM = 120  # قرب الميناء/المحطة (تشغيلياً)
 
+# صندوق التقاط واسع (لضمان وصول دفق)
 SAUDI_BIG_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
-# =========================
-# KSA-only (tight)
-# =========================
+# ممرات “سواحل المملكة فقط” (لتفادي احتساب دبي/الجوار ضمن مؤشرات السعودية)
 KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]
 KSA_GULF    = [[24.0, 48.4], [28.9, 52.6]]
 
 # =========================
-# Regional corridors (wider)
+# موانئ المملكة الاستراتيجية + محطات النفط الرئيسية
+# (إحداثيات تشغيلية تقريبية كافية للتصنيف)
 # =========================
-REG_RED_SEA = [[12.0, 32.0], [30.5, 44.8]]
-REG_GULF    = [[21.0, 47.0], [30.5, 56.5]]
+KSA_SITES = {
+    # البحر الأحمر
+    "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173, "type": "port"},
+    "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089, "type": "port"},
+    "ميناء ينبع التجاري": {"lat": 24.0665, "lon": 38.0675, "type": "port"},
+    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573, "type": "port"},
+    "ميناء ضباء": {"lat": 27.5606, "lon": 35.5440, "type": "port"},
+    "ميناء نيوم (أوكساچون)": {"lat": 27.730, "lon": 35.310, "type": "port"},
 
-# =========================
-# KSA ports
-# =========================
-PORTS_KSA = {
-    "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
-    "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
-    "ميناء ينبع التجاري": {"lat": 24.0665, "lon": 38.0675},
-    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573},
-    "ميناء ضباء": {"lat": 27.5606, "lon": 35.5440},
-    "ميناء الملك عبدالعزيز (الدمام)": {"lat": 26.4410, "lon": 50.1485},
-    "ميناء الجبيل التجاري": {"lat": 27.0241, "lon": 49.6793},
-    "محطة نفط رأس تنورة": {"lat": 26.6726, "lon": 50.1219},
-    "محطة نفط الجعيمة (Juaymah)": {"lat": 26.93, "lon": 50.06},
-    "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
+    # الخليج العربي
+    "ميناء الملك عبدالعزيز (الدمام)": {"lat": 26.4410, "lon": 50.1485, "type": "port"},
+    "ميناء الجبيل التجاري": {"lat": 27.0241, "lon": 49.6793, "type": "port"},
+    "ميناء رأس الخير": {"lat": 27.115, "lon": 49.230, "type": "port"},
+
+    # محطات النفط
+    "محطة نفط رأس تنورة": {"lat": 26.6726, "lon": 50.1219, "type": "oil"},
+    "محطة نفط الجعيمة (Juaymah)": {"lat": 26.93, "lon": 50.06, "type": "oil"},
+    "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921, "type": "oil"},
 }
 
-# =========================
-# Regional ports (fallback)
-# =========================
-PORTS_REGIONAL = {
-    "ميناء راشد (دبي)": {"lat": 25.270, "lon": 55.275},
-    "ميناء جبل علي (دبي)": {"lat": 24.985, "lon": 55.060},
-    "ميناء خورفكان": {"lat": 25.340, "lon": 56.360},
-    "ميناء الفجيرة": {"lat": 25.120, "lon": 56.330},
-    "ميناء أبوظبي (خليفة)": {"lat": 24.810, "lon": 54.610},
-    "ميناء حمد (قطر)": {"lat": 25.070, "lon": 51.610},
-    "ميناء سلمان (البحرين)": {"lat": 26.150, "lon": 50.620},
-    "ميناء الشويخ (الكويت)": {"lat": 29.360, "lon": 47.950},
-    "ميناء صحار": {"lat": 24.490, "lon": 56.620},
-}
-
-def send_telegram(text: str):
+def send(msg: str):
     requests.post(
         f"https://api.telegram.org/bot{BOT}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text},
+        json={"chat_id": CHAT_ID, "text": msg},
         timeout=25
     )
 
-def load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-def save_json(path, obj):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def haversine_km(lat1, lon1, lat2, lon2):
+def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
-    p1 = math.radians(lat1); p2 = math.radians(lat2)
-    dlat = math.radians(lat2 - lat1); dlon = math.radians(lon2 - lon1)
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlon/2)**2
     return 2 * R * math.asin(math.sqrt(a))
 
-def extract_mmsi(data):
-    meta = data.get("MetaData") or data.get("Metadata") or {}
-    m = meta.get("MMSI") or meta.get("mmsi")
-    if m:
-        return str(m)
-    msg = data.get("Message", {})
-    for _, blk in msg.items():
-        if isinstance(blk, dict) and "UserID" in blk:
-            return str(blk["UserID"])
-    return ""
+def in_box(lat, lon, box):
+    (a1, o1), (a2, o2) = box
+    return (min(a1, a2) <= lat <= max(a1, a2)) and (min(o1, o2) <= lon <= max(o1, o2))
 
-def extract_lat_lon(data):
-    meta = data.get("MetaData") or data.get("Metadata") or {}
-    lat = None; lon = None
-    for lk in ("latitude","Latitude","lat","LAT"):
-        if lk in meta:
-            try: lat = float(meta[lk]); break
-            except: pass
-    for ok in ("longitude","Longitude","lon","LON","lng","Lng"):
-        if ok in meta:
-            try: lon = float(meta[ok]); break
-            except: pass
-    if lat is None or lon is None:
-        msg = data.get("Message", {})
+def get_lat_lon(d):
+    meta = d.get("MetaData") or d.get("Metadata") or {}
+    lat = meta.get("latitude") or meta.get("Latitude") or meta.get("lat")
+    lon = meta.get("longitude") or meta.get("Longitude") or meta.get("lon")
+    if lat is not None and lon is not None:
+        lat = float(lat); lon = float(lon)
+    else:
+        msg = d.get("Message", {})
+        lat = lon = None
         for _, blk in msg.items():
             if isinstance(blk, dict) and "Latitude" in blk and "Longitude" in blk:
-                try:
-                    lat = float(blk["Latitude"]); lon = float(blk["Longitude"])
-                    break
-                except:
-                    pass
-    if lat is None or lon is None:
-        raise KeyError
+                lat = float(blk["Latitude"]); lon = float(blk["Longitude"])
+                break
+        if lat is None or lon is None:
+            raise KeyError
 
+    # تصحيح محتمل لتبديل lat/lon
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         if (-90 <= lon <= 90 and -180 <= lat <= 180):
             lat, lon = lon, lat
@@ -129,318 +85,178 @@ def extract_lat_lon(data):
             raise KeyError
     return lat, lon
 
-def get_nav_status(data):
-    msg = data.get("Message", {})
+def get_waiting(d):
+    msg = d.get("Message", {})
     for _, blk in msg.items():
         if isinstance(blk, dict):
-            for k in ("NavigationalStatus","NavStatus","NavigationStatus"):
-                if k in blk:
-                    try: return int(blk[k])
-                    except: pass
-    return None
-
-def get_sog_knots(data):
-    msg = data.get("Message", {})
-    for _, blk in msg.items():
-        if isinstance(blk, dict):
-            for k in ("Sog","SOG","SpeedOverGround","Speed"):
-                if k in blk:
-                    try: return float(blk[k])
-                    except: pass
-    return None
-
-def is_waiting(data):
-    nav = get_nav_status(data)
-    if nav in (1,5):
-        return True
-    sog = get_sog_knots(data)
-    if sog is not None and sog <= WAITING_SPEED_KTS:
-        return True
+            sog = blk.get("Sog") or blk.get("SOG") or blk.get("SpeedOverGround")
+            if sog is not None:
+                try:
+                    return float(sog) <= WAITING_SPEED_KTS
+                except:
+                    pass
     return False
 
-def is_oil_tanker(vtype):
-    try: v = int(vtype)
-    except: v = 0
-    return 80 <= v <= 89
-
-def in_box(lat, lon, box):
-    (a1, o1), (a2, o2) = box
-    return (min(a1,a2) <= lat <= max(a1,a2)) and (min(o1,o2) <= lon <= max(o1,o2))
-
-def run_stream(boxes, seconds, type_cache):
-    opened = False
-    subsent = False
-    last_error = None
-
-    samples_total = 0
-    samples_pos = 0
-    samples_static = 0
-
+def run_stream():
     vessels = {}
-    points = []
-    min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
+    opened = False
 
     def on_open(ws):
-        nonlocal opened, subsent
+        nonlocal opened
         opened = True
-        ws.send(json.dumps({"APIKey": API_KEY, "BoundingBoxes": boxes}))
-        subsent = True
-
-    def on_error(ws, err):
-        nonlocal last_error
-        last_error = str(err)
+        ws.send(json.dumps({
+            "APIKey": API_KEY,
+            "BoundingBoxes": [SAUDI_BIG_BOX]
+        }))
 
     def on_message(ws, message):
-        nonlocal samples_total, samples_pos, samples_static
-        nonlocal min_lat, max_lat, min_lon, max_lon
-
-        samples_total += 1
         try:
-            data = json.loads(message)
+            d = json.loads(message)
+            lat, lon = get_lat_lon(d)
         except:
             return
 
-        mmsi = extract_mmsi(data)
+        meta = d.get("MetaData") or d.get("Metadata") or {}
+        mmsi = meta.get("MMSI") or meta.get("mmsi")
         if not mmsi:
             return
 
-        mt = data.get("MessageType")
-        if mt == "ShipStaticData":
-            samples_static += 1
-            try:
-                vtype = int(data["Message"]["ShipStaticData"].get("Type", 0))
-                if vtype:
-                    type_cache[mmsi] = vtype
-            except:
-                pass
-            return
-
-        try:
-            lat, lon = extract_lat_lon(data)
-        except:
-            return
-
-        samples_pos += 1
-        min_lat = min(min_lat, lat); max_lat = max(max_lat, lat)
-        min_lon = min(min_lon, lon); max_lon = max(max_lon, lon)
-
-        if len(points) < 10:
-            points.append((lat, lon))
-
-        vessels[mmsi] = {
+        vessels[str(mmsi)] = {
             "lat": lat,
             "lon": lon,
-            "waiting": is_waiting(data),
-            "type": type_cache.get(mmsi, 0)
+            "waiting": get_waiting(d)
         }
 
     ws = websocket.WebSocketApp(
         "wss://stream.aisstream.io/v0/stream",
-        on_open=on_open, on_message=on_message, on_error=on_error
+        on_open=on_open,
+        on_message=on_message
     )
 
-    timer = threading.Timer(seconds, lambda: ws.close())
-    timer.start()
+    t = threading.Timer(CAPTURE_SECONDS, lambda: ws.close())
+    t.start()
     ws.run_forever(ping_interval=20, ping_timeout=10)
-    timer.cancel()
+    t.cancel()
 
-    win = None
-    if samples_pos > 0:
-        win = f"lat[{min_lat:.4f},{max_lat:.4f}] lon[{min_lon:.4f},{max_lon:.4f}]"
+    return vessels, opened
 
-    return {
-        "opened": opened, "subsent": subsent, "last_error": last_error,
-        "messages": samples_total, "position": samples_pos, "static": samples_static,
-        "vessels": vessels, "latlon_window": win, "sample_points": points
-    }
-
-def compute_port_stats(vessels, ports, topn=7):
-    # Each vessel -> nearest port; count only those within radius.
-    stats = {k: {"within": 0, "waiting": 0, "tankers_conf": 0, "type_unknown": 0, "min_d": None} for k in ports.keys()}
-
-    for _, v in vessels.items():
-        best_name = None
-        best_d = 10**9
-        for name, p in ports.items():
-            d = haversine_km(p["lat"], p["lon"], v["lat"], v["lon"])
-            if d < best_d:
-                best_d = d
-                best_name = name
-
-        if best_name is None:
-            continue
-
-        cur = stats[best_name]["min_d"]
-        stats[best_name]["min_d"] = best_d if (cur is None or best_d < cur) else cur
-
-        if best_d <= CONGESTION_RADIUS_KM:
-            stats[best_name]["within"] += 1
-            if v["waiting"]:
-                stats[best_name]["waiting"] += 1
-
-            t = v.get("type", 0)
-            if t == 0:
-                stats[best_name]["type_unknown"] += 1
-            elif is_oil_tanker(t):
-                stats[best_name]["tankers_conf"] += 1
-
-    usable = [(name, s) for name, s in stats.items() if s["min_d"] is not None]
-    ranked = sorted(usable, key=lambda x: (x[1]["within"], x[1]["waiting"]), reverse=True)[:topn]
-    return ranked
-
-def hotspots(vessels, cell_deg=0.5, topn=7):
-    grid = defaultdict(int)
-    for _, v in vessels.items():
-        lat = round(v["lat"]/cell_deg)*cell_deg
-        lon = round(v["lon"]/cell_deg)*cell_deg
-        grid[(lat, lon)] += 1
-    ranked = sorted(grid.items(), key=lambda x: x[1], reverse=True)[:topn]
-    return ranked
-
-# =========================
-# Risk Index (0-100)
-# Based on the busiest (top) port line in the used set.
-# =========================
 def clamp(x, a, b):
     return max(a, min(b, x))
 
-def score_density(total):
-    return 40.0 * clamp(total / 120.0, 0.0, 1.0)
+def risk_index(total_ksa, waiting_ksa):
+    """
+    مؤشر مخاطر بحري "خاص بسواحل المملكة" فقط.
+    إذا مافيه تغطية داخل سواحل المملكة: نعطي مؤشر منخفض/توثيقي بدل ما نطلع رقم مضلل.
+    """
+    if total_ksa <= 0:
+        return 20
 
-def score_waiting(waiting, total):
-    if total <= 0:
-        return 0.0
-    ratio = waiting / total
-    return 35.0 * clamp(ratio / 0.80, 0.0, 1.0)
+    density = 50.0 * clamp(total_ksa / 80.0, 0.0, 1.0)          # 0..50
+    ratio = waiting_ksa / total_ksa if total_ksa else 0.0
+    waiting_score = 50.0 * clamp(ratio / 0.70, 0.0, 1.0)         # 0..50
 
-def score_tankers(tankers_confirmed):
-    return 15.0 * clamp(tankers_confirmed / 10.0, 0.0, 1.0)
+    score = int(round(density + waiting_score))
+    return int(clamp(score, 0, 100))
 
-def score_unknown(unknown, total):
-    if total <= 0:
-        return 0.0
-    ratio = unknown / total
-    return 10.0 * clamp(ratio / 0.60, 0.0, 1.0)
-
-def risk_label_for(idx):
-    if idx >= 80:
-        return "🔴 مرتفع"
-    if idx >= 55:
-        return "🟠 متوسط-مرتفع"
-    if idx >= 30:
-        return "🟡 متوسط"
+def risk_label(score):
+    if score >= 80: return "🔴 مرتفع"
+    if score >= 55: return "🟠 متوسط-مرتفع"
+    if score >= 30: return "🟡 متوسط"
     return "🟢 منخفض"
 
-if __name__ == "__main__":
-    type_cache = load_json(TYPE_CACHE_FILE, {})
+def activity_level(n):
+    if n >= 30: return "🔴 مرتفع"
+    if n >= 12: return "🟠 متوسط"
+    if n >= 4:  return "🟡 محدود"
+    return "🟢 منخفض"
 
-    regional = run_stream([SAUDI_BIG_BOX], CAPTURE_SECONDS, type_cache)
-    glob = run_stream([[[-90.0, -180.0], [90.0, 180.0]]], GLOBAL_TEST_SECONDS, type_cache)
+# =========================
+# MAIN
+# =========================
+vessels, opened = run_stream()
 
-    save_json(TYPE_CACHE_FILE, type_cache)
+# فلترة سفن “سواحل المملكة فقط”
+ksa_vessels = {}
+for m, v in vessels.items():
+    lat, lon = v["lat"], v["lon"]
+    if in_box(lat, lon, KSA_RED_SEA) or in_box(lat, lon, KSA_GULF):
+        ksa_vessels[m] = v
 
-    all_v = regional["vessels"]
+total_all = len(vessels)
+total_ksa = len(ksa_vessels)
+waiting_ksa = sum(1 for v in ksa_vessels.values() if v["waiting"])
 
-    ksa_v = {m:v for m,v in all_v.items() if (in_box(v["lat"], v["lon"], KSA_RED_SEA) or in_box(v["lat"], v["lon"], KSA_GULF))}
-    reg_v = {m:v for m,v in all_v.items() if (in_box(v["lat"], v["lon"], REG_RED_SEA) or in_box(v["lat"], v["lon"], REG_GULF))}
+# تقسيم البحر الأحمر/الخليج داخل السعودية
+ksa_red = 0
+ksa_gulf = 0
+for v in ksa_vessels.values():
+    if in_box(v["lat"], v["lon"], KSA_RED_SEA): ksa_red += 1
+    if in_box(v["lat"], v["lon"], KSA_GULF): ksa_gulf += 1
 
-    used_label = "KSA-only"
-    used_v = ksa_v
-    used_ports = PORTS_KSA
+# نشاط قرب المواقع الاستراتيجية (موانئ ومحطات نفط)
+site_counts = {name: {"total": 0, "waiting": 0} for name in KSA_SITES.keys()}
+for v in ksa_vessels.values():
+    for name, s in KSA_SITES.items():
+        d = haversine(v["lat"], v["lon"], s["lat"], s["lon"])
+        if d <= PORT_RADIUS_KM:
+            site_counts[name]["total"] += 1
+            if v["waiting"]:
+                site_counts[name]["waiting"] += 1
 
-    note = ""
-    if len(ksa_v) == 0:
-        used_label = "Regional (no KSA coastal coverage)"
-        used_v = reg_v
-        used_ports = PORTS_REGIONAL
-        note = "⚠️ لا توجد تغطية AIS قرب سواحل المملكة في هذه النافذة — تم التحويل تلقائيًا لعرض موانئ إقليمية + نقاط كثافة."
+# ترتيب أعلى 5 مواقع
+ranked = sorted(site_counts.items(), key=lambda x: (x[1]["total"], x[1]["waiting"]), reverse=True)
+top_sites = [(n, d["total"], d["waiting"], KSA_SITES[n]["type"]) for n, d in ranked if d["total"] > 0][:5]
 
-    port_rank = compute_port_stats(used_v, used_ports, topn=7)
-    hot = hotspots(used_v, cell_deg=0.5, topn=7)
+# مؤشر المخاطر
+score = risk_index(total_ksa, waiting_ksa)
+label = risk_label(score)
 
-    # Clean port lines
-    ports_lines = []
-    for name, s in port_rank:
-        within = s["within"]
-        waiting = s["waiting"]
-        tank_conf = s["tankers_conf"]
-        unk = s["type_unknown"]
-        mind = s["min_d"] if s["min_d"] is not None else 10**9
-
-        # show only meaningful (within>0 OR mind<=400km)
-        if within == 0 and mind > 400:
-            continue
-
-        ports_lines.append(
-            f"• {name}: ضمن {CONGESTION_RADIUS_KM}كم = {within} | منتظرة/راسية {waiting} | ناقلات مؤكدة {tank_conf} | نوع غير معروف {unk} | أقرب مسافة ~{mind:.0f}كم"
-        )
-
-    hot_lines = [f"• خلية lat={lat:.1f}, lon={lon:.1f} : {cnt} سفينة" for (lat, lon), cnt in hot]
-
-    # Sample points
-    pts = regional["sample_points"]
-    pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
-
-    # Risk index based on busiest port (first in rank)
-    top_name = "N/A"
-    top_total = 0
-    top_waiting = 0
-    top_tank = 0
-    top_unk = 0
-    if port_rank:
-        top_name, top_s = port_rank[0]
-        top_total = top_s["within"]
-        top_waiting = top_s["waiting"]
-        top_tank = top_s["tankers_conf"]
-        top_unk = top_s["type_unknown"]
-
-    S = (
-        score_density(top_total) +
-        score_waiting(top_waiting, top_total) +
-        score_tankers(top_tank) +
-        score_unknown(top_unk, top_total)
+# ملخص تنفيذي
+if total_ksa == 0:
+    exec_summary = (
+        "• لا توجد تغطية AIS كافية داخل سواحل المملكة في نافذة الالتقاط الحالية.\n"
+        "• تم رصد حركة ضمن النطاق العام، لكن ليست ضمن ممرات سواحل المملكة."
     )
-    risk_index = int(round(clamp(S, 0.0, 100.0)))
-    risk_lbl = risk_label_for(risk_index)
+else:
+    exec_summary = (
+        f"• تم رصد {total_ksa} سفينة ضمن سواحل المملكة.\n"
+        f"• سفن منتظرة/راسية: {waiting_ksa}."
+    )
 
-    risk_block = f"""📊 مؤشر المخاطر البحري:
-• {risk_index}/100 — {risk_lbl}
-• المرجع: {top_name} (ضمن {CONGESTION_RADIUS_KM}كم: {top_total} سفينة، انتظار/رسو {top_waiting})
-• تفسير: يعتمد على كثافة السفن + نسبة الرسو/الانتظار + ناقلات النفط المؤكدة + مستوى عدم اليقين (Unknown).
-"""
+# أهم المواقع
+if not top_sites:
+    sites_block = "• لا توجد كثافة واضحة قرب موانئ/محطات المملكة ضمن النافذة الحالية."
+else:
+    lines = []
+    for name, t, w, typ in top_sites:
+        tag = "🛢️" if typ == "oil" else "⚓"
+        lines.append(f"{tag} {name}: {activity_level(t)} (إجمالي {t} | انتظار/رسو {w})")
+    sites_block = "\n".join(lines)
 
-    msg = f"""🚢 تقرير الملاحة (موانئ + محطات نفط) — Smart Clean + Risk
+msg = f"""⚓ التقرير البحري الوطني – غرفة العمليات (نسخة A)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
-📡 Saudi Big Box:
-• messages: {regional['messages']} | position: {regional['position']} | static: {regional['static']}
-• vessels unique (all): {len(all_v)}
-• lat/lon window (all): {regional['latlon_window'] or 'N/A'}
-
-🇸🇦 KSA-only vessels: {len(ksa_v)}
-🌐 Regional vessels: {len(reg_v)}
-📍 الحساب المستخدم: {used_label}
-{note}
+📊 مؤشر المخاطر البحري (سواحل المملكة):
+{score}/100 — {label}
 
 ════════════════════
-{risk_block}
+📍 الملخص التنفيذي:
+{exec_summary}
 
 ════════════════════
-⚓ أقرب الموانئ/المحطات (منطق نظيف):
-""" + ("\n".join(ports_lines) if ports_lines else "• لا يوجد ضمن نطاقات مفيدة") + f"""
+🚢 الحركة البحرية داخل سواحل المملكة:
+• البحر الأحمر: {ksa_red if total_ksa else "تغطية ضعيفة"}
+• الخليج العربي: {ksa_gulf if total_ksa else "تغطية ضعيفة"}
 
 ════════════════════
-🔥 نقاط كثافة (Hotspots):
-""" + ("\n".join(hot_lines) if hot_lines else "• لا يوجد") + f"""
+⚓ الموانئ والمحطات الاستراتيجية (ضمن {PORT_RADIUS_KM} كم):
+{sites_block}
 
 ════════════════════
-🌍 اختبار عالمي ({GLOBAL_TEST_SECONDS}s):
-• global_messages: {glob['messages']} | global_position: {glob['position']}
-
-════════════════════
-📌 عينة نقاط (أول 10 من الدفق العام):
-{pts_txt}
+🧭 توصية تشغيلية:
+• متابعة التحديث القادم.
+• عند استمرار ضعف التغطية: اعتبر المؤشر “استرشادي” وليس قياسًا كاملًا.
 """
 
-    send_telegram(msg)
+send(msg)
