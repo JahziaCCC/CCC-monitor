@@ -9,35 +9,33 @@ now = datetime.datetime.now(KSA_TZ)
 
 CAPTURE_SECONDS = 600
 GLOBAL_TEST_SECONDS = 20
-
 TYPE_CACHE_FILE = "ais_type_cache.json"
 
 WAITING_SPEED_KTS = 0.7
-CONGESTION_RADIUS_KM = 250  # 250كم مناسب للموانئ/محطات النفط + مناطق الانتظار القريبة
+CONGESTION_RADIUS_KM = 250
 
-# ✅ اشتراك ثابت (واسع) لأنه يشتغل عندك
 SAUDI_BIG_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
-# ✅ فلترة محلية ضيّقة لسواحل المملكة فقط
-# البحر الأحمر (ساحل المملكة) — يستبعد شمالاً جهة فلسطين/إسرائيل
-KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]   # lat 16..29.8, lon 34..41.8
+# =========================
+# 1) KSA-only coastal corridors (tight)
+# =========================
+KSA_RED_SEA = [[16.0, 34.0], [29.8, 41.8]]
+KSA_GULF    = [[24.0, 48.4], [28.9, 52.6]]
 
-# الخليج العربي (ساحل المملكة) — يستبعد دبي/عُمان
-KSA_GULF = [[24.0, 48.4], [28.9, 52.6]]      # lat 24..28.9, lon 48.4..52.6
+# =========================
+# 2) Regional corridors (wider — Gulf neighbors + Red Sea region)
+# =========================
+REG_RED_SEA = [[12.0, 32.0], [30.5, 44.8]]
+REG_GULF    = [[21.0, 47.0], [30.5, 56.5]]  # يشمل الكويت/البحرين/قطر/الإمارات/شمال عمان
 
 PORTS = {
-    # Red Sea (KSA)
     "ميناء جدة الإسلامي": {"lat": 21.484, "lon": 39.173},
     "ميناء الملك عبدالله (KAEC)": {"lat": 22.523, "lon": 39.089},
     "ميناء ينبع التجاري": {"lat": 24.0665, "lon": 38.0675},
-    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573},  # جازان قريب من الحد، ممكن يطلع قليل حسب التغطية
+    "ميناء جازان": {"lat": 16.9189, "lon": 42.5573},
     "ميناء ضباء": {"lat": 27.5606, "lon": 35.5440},
-
-    # Gulf (KSA)
     "ميناء الملك عبدالعزيز (الدمام)": {"lat": 26.4410, "lon": 50.1485},
     "ميناء الجبيل التجاري": {"lat": 27.0241, "lon": 49.6793},
-
-    # Oil terminals (KSA)
     "محطة نفط رأس تنورة": {"lat": 26.6726, "lon": 50.1219},
     "محطة نفط الجعيمة (Juaymah)": {"lat": 26.93, "lon": 50.06},
     "محطة نفط تناجيب (Tanajib)": {"lat": 27.7948, "lon": 48.8921},
@@ -85,7 +83,6 @@ def extract_mmsi(data):
 def extract_lat_lon(data):
     meta = data.get("MetaData") or data.get("Metadata") or {}
     lat = None; lon = None
-
     for lk in ("latitude","Latitude","lat","LAT"):
         if lk in meta:
             try: lat = float(meta[lk]); break
@@ -94,7 +91,6 @@ def extract_lat_lon(data):
         if ok in meta:
             try: lon = float(meta[ok]); break
             except: pass
-
     if lat is None or lon is None:
         msg = data.get("Message", {})
         for _, blk in msg.items():
@@ -104,7 +100,6 @@ def extract_lat_lon(data):
                     break
                 except:
                     pass
-
     if lat is None or lon is None:
         raise KeyError
 
@@ -113,7 +108,6 @@ def extract_lat_lon(data):
             lat, lon = lon, lat
         else:
             raise KeyError
-
     return lat, lon
 
 def get_nav_status(data):
@@ -171,7 +165,6 @@ def run_stream(boxes, seconds, type_cache):
 
     vessels = {}
     points = []
-
     min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
 
     def on_open(ws):
@@ -285,29 +278,36 @@ if __name__ == "__main__":
 
     all_v = regional["vessels"]
 
-    # ✅ فلترة KSA-only: لازم تكون السفينة داخل أحد الممرين (البحر الأحمر KSA أو الخليج KSA)
-    ksa_v = {}
-    for m, v in all_v.items():
-        if in_box(v["lat"], v["lon"], KSA_RED_SEA) or in_box(v["lat"], v["lon"], KSA_GULF):
-            ksa_v[m] = v
+    # KSA-only vessels
+    ksa_v = {m:v for m,v in all_v.items() if (in_box(v["lat"], v["lon"], KSA_RED_SEA) or in_box(v["lat"], v["lon"], KSA_GULF))}
+    # Regional vessels (neighbors included)
+    reg_v = {m:v for m,v in all_v.items() if (in_box(v["lat"], v["lon"], REG_RED_SEA) or in_box(v["lat"], v["lon"], REG_GULF))}
 
-    excluded = len(all_v) - len(ksa_v)
+    excluded_ksa = len(all_v) - len(ksa_v)
 
-    ports_now, near50, nearR, buckets = compute_ports(ksa_v)
+    # Decide which set to use for port congestion calc
+    used_label = "KSA-only"
+    used_v = ksa_v
+    if len(ksa_v) == 0 and len(reg_v) > 0:
+        used_label = "Regional (no KSA coastal coverage)"
+        used_v = reg_v
+
+    ports_now, near50, nearR, buckets = compute_ports(used_v)
     ranked = sorted(ports_now.items(), key=lambda x: (x[1]["waiting"], x[1]["total"]), reverse=True)
 
     lines = []
     for name, v in ranked:
         lvl = congestion_level(v["total"], v["waiting"])
-        lines.append(
-            f"{lvl} {name}\n"
-            f"• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}"
-        )
+        lines.append(f"{lvl} {name}\n• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}")
 
     pts = regional["sample_points"]
     pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
 
-    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (KSA-only Filter)
+    coverage_note = ""
+    if len(ksa_v) == 0:
+        coverage_note = "⚠️ لا توجد تغطية AIS كافية قرب سواحل المملكة في نافذة الالتقاط الحالية (الدفق وصل من مناطق مجاورة مثل الإمارات/شمال غرب)."
+
+    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (KSA + Regional Fallback)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
@@ -316,20 +316,22 @@ if __name__ == "__main__":
 • vessels unique (all): {len(all_v)}
 • lat/lon window (all): {regional['latlon_window'] or 'N/A'}
 
-🇸🇦 فلترة “سواحل المملكة فقط”:
+🇸🇦 KSA-only coverage:
 • KSA coastal vessels: {len(ksa_v)}
-• Excluded (outside KSA coastal corridors): {excluded}
+• Excluded (outside KSA corridors): {excluded_ksa}
 
-📍 قرب موانئ/محطات المملكة (من السفن السعودية فقط):
+🌐 Regional coverage:
+• Regional vessels (RedSea+Gulf wider): {len(reg_v)}
+
+📍 الحساب المستخدم للازدحام: {used_label}
+{coverage_note}
+
+📍 قرب الموانئ/المحطات (حسب المجموعة المستخدمة):
 • <=50كم={near50} | <= {CONGESTION_RADIUS_KM}كم={nearR}
 • nearest dist buckets: 0-50={buckets[0]}, 50-{CONGESTION_RADIUS_KM}={buckets[1]}, >{CONGESTION_RADIUS_KM}={buckets[2]}
 
 🌍 اختبار عالمي ({GLOBAL_TEST_SECONDS}s):
 • global_messages: {glob['messages']} | global_position: {glob['position']}
-
-🔎 تشخيص:
-• opened: {regional['opened']} | subscription_sent: {regional['subsent']}
-• last_error: {regional['last_error'] or 'N/A'}
 
 ════════════════════
 📌 عينة نقاط (أول 10 من الدفق العام):
