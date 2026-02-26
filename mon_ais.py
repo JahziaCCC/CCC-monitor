@@ -15,12 +15,15 @@ TYPE_CACHE_FILE = "ais_type_cache.json"
 WAITING_SPEED_KTS = 0.7
 CONGESTION_RADIUS_KM = 200
 
-# ✅ صندوق كبير (ثبت أنه يشتغل عندك)
+# ✅ صندوق كبير ثابت
 SAUDI_REGION_BOX = [[10.0, 32.0], [32.5, 58.5]]
 
-# ✅ الممران الساحليان (فلترة محلية فقط — ليست للاشتراك)
-RED_SEA_CORRIDOR = [[14.0, 33.0], [30.5, 43.0]]      # lat 14..30.5, lon 33..43
-ARABIAN_GULF_CORRIDOR = [[23.0, 47.0], [29.7, 52.7]]  # lat 23..29.7, lon 47..52.7
+# ✅ ممرات موسّعة (فلترة محلية فقط)
+# البحر الأحمر + خليج العقبة (وسعنا lon قليل شمالاً)
+RED_SEA_CORRIDOR = [[12.0, 32.0], [32.5, 44.8]]     # lat 12..32.5, lon 32..44.8
+
+# الخليج العربي + امتداد شرقي (عشان lon عندك يوصل 55)
+ARABIAN_GULF_CORRIDOR = [[19.0, 46.0], [31.5, 56.2]]  # lat 19..31.5, lon 46..56.2
 
 PORTS = {
     # Red Sea
@@ -103,7 +106,7 @@ def extract_lat_lon(data):
     if lat is None or lon is None:
         raise KeyError
 
-    # sanity
+    # sanity + swap
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         if (-90 <= lon <= 90 and -180 <= lat <= 180):
             lat, lon = lon, lat
@@ -165,7 +168,8 @@ def run_stream(boxes, seconds, type_cache):
     samples_pos = 0
     samples_static = 0
 
-    vessels = {}  # mmsi -> {lat,lon,waiting,type}
+    vessels = {}
+    points = []  # sample points
 
     min_lat = 999; max_lat = -999; min_lon = 999; max_lon = -999
 
@@ -213,6 +217,9 @@ def run_stream(boxes, seconds, type_cache):
         min_lat = min(min_lat, lat); max_lat = max(max_lat, lat)
         min_lon = min(min_lon, lon); max_lon = max(max_lon, lon)
 
+        if len(points) < 10:
+            points.append((lat, lon))
+
         vessels[mmsi] = {
             "lat": lat,
             "lon": lon,
@@ -237,7 +244,7 @@ def run_stream(boxes, seconds, type_cache):
     return {
         "opened": opened, "subsent": subsent, "last_error": last_error,
         "messages": samples_total, "position": samples_pos, "static": samples_static,
-        "vessels": vessels, "latlon_window": win
+        "vessels": vessels, "latlon_window": win, "sample_points": points
     }
 
 def compute_ports(vessels):
@@ -270,15 +277,11 @@ def compute_ports(vessels):
 if __name__ == "__main__":
     type_cache = load_json(TYPE_CACHE_FILE, {})
 
-    # ✅ اشتراك ثابت واحد فقط
     regional = run_stream([SAUDI_REGION_BOX], CAPTURE_SECONDS, type_cache)
-
-    # ✅ اختبار عالمي للتأكد الخدمة شغالة
     glob = run_stream([[[-90.0, -180.0], [90.0, 180.0]]], GLOBAL_TEST_SECONDS, type_cache)
 
     save_json(TYPE_CACHE_FILE, type_cache)
 
-    # فلترة محلية للممرين
     all_v = regional["vessels"]
     red_v = {}
     gulf_v = {}
@@ -289,9 +292,10 @@ if __name__ == "__main__":
         if in_box(v["lat"], v["lon"], ARABIAN_GULF_CORRIDOR):
             gulf_v[m] = v
 
-    # نجمع الممرين فقط لحساب الموانئ
     corridor_v = dict(red_v)
     corridor_v.update(gulf_v)
+
+    outside = len(all_v) - len(set(list(red_v.keys()) + list(gulf_v.keys())))
 
     ports_now, near50, nearR, buckets = compute_ports(corridor_v)
     ranked = sorted(ports_now.items(), key=lambda x: (x[1]["waiting"], x[1]["total"]), reverse=True)
@@ -299,12 +303,12 @@ if __name__ == "__main__":
     lines = []
     for name, v in ranked:
         lvl = congestion_level(v["total"], v["waiting"])
-        lines.append(
-            f"{lvl} {name}\n"
-            f"• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}"
-        )
+        lines.append(f"{lvl} {name}\n• ضمن {CONGESTION_RADIUS_KM}كم: إجمالي {v['total']} | منتظرة/راسية {v['waiting']} | ناقلات {v['tankers']}")
 
-    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Big Box + Local Corridors)
+    pts = regional["sample_points"]
+    pts_txt = "\n".join([f"• {i+1}) lat={p[0]:.4f}, lon={p[1]:.4f}" for i, p in enumerate(pts)]) if pts else "• لا يوجد"
+
+    msg = f"""⚓ تقرير ازدحام موانئ المملكة + محطات النفط (Big Box + Wider Corridors + Samples)
 🕒 {now.strftime('%Y-%m-%d %H:%M')} KSA
 
 ════════════════════
@@ -313,10 +317,11 @@ if __name__ == "__main__":
 • vessels unique (all): {len(all_v)}
 • lat/lon window (all): {regional['latlon_window'] or 'N/A'}
 
-🧭 فلترة محلية للممرات الساحلية:
+🧭 فلترة محلية (موسّعة):
 • Red Sea corridor: {len(red_v)}
 • Gulf corridor: {len(gulf_v)}
 • Total corridor vessels: {len(corridor_v)}
+• Outside corridors: {outside}
 
 📍 قرب موانئ/محطات المملكة (من سفن الممرات فقط):
 • <=50كم={near50} | <= {CONGESTION_RADIUS_KM}كم={nearR}
@@ -328,6 +333,10 @@ if __name__ == "__main__":
 🔎 تشخيص:
 • opened: {regional['opened']} | subscription_sent: {regional['subsent']}
 • last_error: {regional['last_error'] or 'N/A'}
+
+════════════════════
+📌 عينة نقاط (أول 10):
+{pts_txt}
 
 ════════════════════
 """ + "\n\n".join(lines)
