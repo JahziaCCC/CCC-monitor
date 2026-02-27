@@ -38,50 +38,56 @@ def safe_float(v):
         if v is None:
             return 0.0
         s = str(v).strip()
-        if s == "" or s.lower() in {"n","na","nan","null","none"}:
+        if s == "" or s.lower() in {"n", "na", "nan", "null", "none"}:
             return 0.0
         return float(s)
     except:
         return 0.0
 
+
 def in_box(lat, lon, box):
     return box[0] <= lat <= box[1] and box[2] <= lon <= box[3]
+
 
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlon/2)**2
+    a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))
+
 
 def maps_link(lat, lon):
     return f"https://maps.google.com/?q={lat:.5f},{lon:.5f}"
+
 
 # =========================
 # استبعاد حضري/صناعي
 # =========================
 URBAN_BOXES = [
-    (24.2,25.2,46.1,47.2),
-    (21.1,21.9,39.0,39.5),
-    (26.2,26.6,50.0,50.4),
-    (26.6,27.2,49.8,50.4),
-    (24.4,24.7,39.5,39.8),
+    (24.2, 25.2, 46.1, 47.2),
+    (21.1, 21.9, 39.0, 39.5),
+    (26.2, 26.6, 50.0, 50.4),
+    (26.6, 27.2, 49.8, 50.4),
+    (24.4, 24.7, 39.5, 39.8),
 ]
 
 INDUSTRIAL_HOTSPOTS = [
-    ("Ras Tanura",26.643,50.162,25),
-    ("Jubail",27.012,49.650,30),
-    ("Dammam Port",26.434,50.103,20),
-    ("Yanbu",24.089,38.062,30),
-    ("Jeddah Port",21.485,39.173,20),
+    ("Ras Tanura", 26.643, 50.162, 25),
+    ("Jubail", 27.012, 49.650, 30),
+    ("Dammam Port", 26.434, 50.103, 20),
+    ("Yanbu", 24.089, 38.062, 30),
+    ("Jeddah Port", 21.485, 39.173, 20),
 ]
 
-RED_SEA_COAST_STRIP = (16.0,30.5,33.0,39.8)
-GULF_COAST_STRIP = (24.0,29.5,47.5,56.5)
+RED_SEA_COAST_STRIP = (16.0, 30.5, 33.0, 39.8)
+GULF_COAST_STRIP = (24.0, 29.5, 47.5, 56.5)
+
 
 def in_urban(lat, lon):
     return any(in_box(lat, lon, b) for b in URBAN_BOXES)
+
 
 def near_industrial(lat, lon):
     for _, hlat, hlon, rkm in INDUSTRIAL_HOTSPOTS:
@@ -89,8 +95,10 @@ def near_industrial(lat, lon):
             return True
     return False
 
+
 def is_probably_coastal(lat, lon):
     return in_box(lat, lon, RED_SEA_COAST_STRIP) or in_box(lat, lon, GULF_COAST_STRIP)
+
 
 def is_wildfire_candidate(f):
     lat = safe_float(f.get("latitude"))
@@ -118,52 +126,58 @@ def is_wildfire_candidate(f):
 
     return True
 
+
 # =========================
 # Telegram
 # =========================
 def tg_send_message(text):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    requests.post(url,json={
-        "chat_id": CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True
-    },timeout=30).raise_for_status()
+    requests.post(
+        url,
+        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+        timeout=30
+    ).raise_for_status()
+
 
 def tg_send_photo(png_bytes, caption=""):
     url = f"https://api.telegram.org/bot{BOT}/sendPhoto"
     files = {"photo": ("wildfires.png", png_bytes, "image/png")}
     data = {"chat_id": CHAT_ID, "caption": caption}
-    requests.post(url,data=data,files=files,timeout=60).raise_for_status()
+    requests.post(url, data=data, files=files, timeout=60).raise_for_status()
+
 
 # =========================
 # STATE
 # =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"seen":{}}
+        return {"seen": {}}
     try:
-        with open(STATE_FILE,"r",encoding="utf-8") as f:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return {"seen":{}}
+        return {"seen": {}}
+
 
 def save_state(state):
-    with open(STATE_FILE,"w",encoding="utf-8") as f:
-        json.dump(state,f,ensure_ascii=False,indent=2)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
 
 def fire_id(f):
     s = f'{safe_float(f.get("latitude")):.5f},{safe_float(f.get("longitude")):.5f}|{f.get("acq_date","")}|{f.get("acq_time","")}'
     return hashlib.sha1(s.encode()).hexdigest()
 
+
 # =========================
 # FIRMS
 # =========================
 def fetch_firms(source, days=2):
-    min_lat,max_lat,min_lon,max_lon = REGION_BOX
+    min_lat, max_lat, min_lon, max_lon = REGION_BOX
     bbox = f"{min_lon},{min_lat},{max_lon},{max_lat}"
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_API_KEY}/{source}/{bbox}/{days}"
 
-    r = requests.get(url,timeout=60)
+    r = requests.get(url, timeout=60)
     r.raise_for_status()
 
     text = r.text.strip()
@@ -173,16 +187,18 @@ def fetch_firms(source, days=2):
     reader = csv.DictReader(text.splitlines())
     return list(reader)
 
+
 def normalize_fire(row, source):
     return {
         "latitude": safe_float(row.get("latitude")),
         "longitude": safe_float(row.get("longitude")),
-        "acq_date": row.get("acq_date",""),
-        "acq_time": row.get("acq_time",""),
+        "acq_date": row.get("acq_date", ""),
+        "acq_time": row.get("acq_time", ""),
         "confidence": safe_float(row.get("confidence")),
         "frp": safe_float(row.get("frp")),
-        "satellite": row.get("satellite",source)
+        "satellite": row.get("satellite", source),
     }
+
 
 # =========================
 # رسم صورة
@@ -191,20 +207,21 @@ def make_points_image(fires):
     lats = [safe_float(f["latitude"]) for f in fires]
     lons = [safe_float(f["longitude"]) for f in fires]
 
-    fig = plt.figure(figsize=(7,7))
+    fig = plt.figure(figsize=(7, 7))
     ax = plt.gca()
     ax.grid(True)
 
-    ax.scatter(lons,lats)
+    ax.scatter(lons, lats)
 
-    for i,f in enumerate(fires,start=1):
-        ax.text(f["longitude"],f["latitude"],f" {i}")
+    for i, f in enumerate(fires, start=1):
+        ax.text(f["longitude"], f["latitude"], f" {i}")
 
     buf = io.BytesIO()
     plt.tight_layout()
-    fig.savefig(buf,format="png",dpi=170)
+    fig.savefig(buf, format="png", dpi=170)
     plt.close(fig)
     return buf.getvalue()
+
 
 # =========================
 # إرسال تنبيه
@@ -214,7 +231,7 @@ def send_fire_alert_bundle(fires):
 
     fires = sorted(
         fires,
-        key=lambda x:(safe_float(x["confidence"]),safe_float(x["frp"])),
+        key=lambda x: (safe_float(x["confidence"]), safe_float(x["frp"])),
         reverse=True
     )[:MAX_ALERTS]
 
@@ -232,26 +249,27 @@ def send_fire_alert_bundle(fires):
         ""
     ]
 
-    for i,f in enumerate(fires,start=1):
+    for i, f in enumerate(fires, start=1):
         lines.append(f"{i}) 🔥 FRP: {f['frp']:.1f} | ثقة: {f['confidence']:.0f}")
-        lines.append(f"📍 {maps_link(f['latitude'],f['longitude'])}")
+        lines.append(f"📍 {maps_link(f['latitude'], f['longitude'])}")
         lines.append("")
 
     tg_send_message("\n".join(lines))
+
 
 # =========================
 # MAIN
 # =========================
 def main():
     state = load_state()
-    seen = state.get("seen",{})
+    seen = state.get("seen", {})
 
-    sources = ["VIIRS_SNPP_NRT","VIIRS_NOAA20_NRT"]
+    sources = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"]
 
     fires = []
     for s in sources:
         rows = fetch_firms(s)
-        fires.extend([normalize_fire(r,s) for r in rows])
+        fires.extend([normalize_fire(r, s) for r in rows])
 
     filtered = [f for f in fires if is_wildfire_candidate(f)]
 
@@ -266,10 +284,17 @@ def main():
     state["seen"] = seen
     save_state(state)
 
+    now = datetime.datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M KSA")
+
     if new_fires:
         send_fire_alert_bundle(new_fires)
     else:
-        tg_send_message("✅ لا توجد حرائق طبيعية جديدة مطابقة للفلترة ضمن السعودية/البحر الأحمر/الخليج.")
+        tg_send_message(
+            f"🟢 حالة الرصد: طبيعي\n"
+            f"📊 عدد الحرائق: 0\n"
+            f"🕒 آخر تحديث: {now}"
+        )
+
 
 if __name__ == "__main__":
     main()
