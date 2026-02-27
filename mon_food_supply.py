@@ -1,4 +1,6 @@
 import os
+import io
+import csv
 import json
 import datetime
 from typing import Dict, List, Optional, Tuple
@@ -24,19 +26,20 @@ COMMODITIES = [
     "الأعلاف",
 ]
 
-# Yahoo tickers (أساسي)
-# ملاحظة: "حليب بودرة" صعب كـ سعر مباشر مجاني؛ نحطه Proxies (MILK/DAIRY) لو توفر، وإلا يرجع TE.
-YF_TICKERS = {
-    "القمح": ["ZW=F", "WEAT"],          # Wheat futures / ETF proxy
-    "الأرز": ["ZR=F"],                  # Rough Rice futures
-    "الذرة": ["ZC=F", "CORN"],          # Corn futures / ETF proxy
-    "الشعير": ["ZC=F", "ZW=F"],         # proxy
-    "الزيت النباتي": ["BO=F", "SOYB"],  # Soybean oil futures / soybean ETF proxy
-    "السكر": ["SB=F", "CANE"],          # Sugar futures / ETF proxy
-    "الأعلاف": ["ZM=F", "ZC=F"],        # Soybean Meal futures, fallback corn
-    "حليب بودرة": ["MILK", "DAIRY"],    # proxies (قد تتوفر أو لا)
+# ====== Stooq symbols (الأهم) ======
+# Stooq غالباً يشتغل مع i=d
+STOOQ_SYMBOLS = {
+    "القمح": ["zw.f"],
+    "الأرز": ["zr.f"],
+    "الذرة": ["zc.f"],
+    "السكر": ["sb.f"],
+    "الزيت النباتي": ["zl.f"],   # Soybean Oil proxy
+    "الأعلاف": ["zm.f", "zc.f"], # Soybean Meal ثم Corn
+    "الشعير": ["zb.f", "zw.f", "zc.f"],  # barley قد لا يتوفر → fallback
+    "حليب بودرة": [],  # غالباً غير متاح مجاناً
 }
 
+# TE keywords fallback (عندك Corn/Barley شغالة)
 MATCH_KEYWORDS = {
     "القمح": ["wheat"],
     "الأرز": ["rice"],
@@ -86,10 +89,9 @@ WEIGHTS = {
 THRESH_MED = 2.0
 THRESH_HIGH = 5.0
 
-# ====== Requests headers (مهم جدًا للياهو) ======
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
+    "Accept": "text/csv,application/json,text/plain,*/*",
     "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
 }
 
@@ -147,47 +149,57 @@ def overall_level(idx: int) -> str:
 def format_exposure(names: List[str]) -> str:
     return " | ".join([f"{FLAGS.get(n,'')} {n}".strip() for n in names])
 
-# ========== Yahoo Finance ==========
-def yf_weekly_change(ticker: str) -> Tuple[Optional[float], Optional[str]]:
-    """
-    يرجع (pct, error)
-    """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {"interval": "1d", "range": "1mo"}  # شهر لضمان وجود 8+ إغلاقات تداول
+# ========== Stooq ==========
+def stooq_fetch_series(symbol: str, days_needed: int = 12) -> Optional[List[float]]:
+    # CSV: Date,Open,High,Low,Close,Volume
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
     try:
-        r = requests.get(url, params=params, headers=HTTP_HEADERS, timeout=45)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=45)
         if r.status_code != 200:
-            return None, f"Yahoo HTTP {r.status_code}"
-        js = r.json()
-        result = js.get("chart", {}).get("result", [])
-        if not result:
-            return None, "Yahoo no result"
-        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        closes = [float(x) for x in closes if x is not None]
-        if len(closes) < 8:
-            return None, "Yahoo not enough data"
-        last = closes[-1]
-        prev = closes[-8]
-        if prev == 0:
-            return None, "Yahoo prev=0"
-        return ((last - prev) / prev) * 100.0, None
-    except Exception as e:
-        return None, f"Yahoo error: {type(e).__name__}"
+            return None
+        text = r.text.strip()
+        if "Date" not in text or "Close" not in text:
+            return None
 
-def weekly_from_yahoo_list(tickers: List[str]) -> Tuple[Optional[float], Optional[str], Optional[str]]:
-    """
-    يرجع (pct, used_ticker, error_summary)
-    """
-    errors = []
-    for t in tickers:
-        pct, err = yf_weekly_change(t)
+        reader = csv.DictReader(io.StringIO(text))
+        closes = []
+        for row in reader:
+            c = row.get("Close")
+            if c is None:
+                continue
+            try:
+                closes.append(float(c))
+            except:
+                pass
+
+        closes = [x for x in closes if x is not None]
+        if len(closes) < days_needed:
+            return None
+        return closes
+    except Exception:
+        return None
+
+def weekly_change_from_closes(closes: List[float]) -> Optional[float]:
+    # نستخدم آخر 8 إغلاقات (≈ 7 أيام تداول)
+    if not closes or len(closes) < 8:
+        return None
+    last = closes[-1]
+    prev = closes[-8]
+    if prev == 0:
+        return None
+    return ((last - prev) / prev) * 100.0
+
+def weekly_from_stooq_list(symbols: List[str]) -> Tuple[Optional[float], Optional[str]]:
+    for sym in symbols:
+        closes = stooq_fetch_series(sym, days_needed=12)
+        if not closes:
+            continue
+        pct = weekly_change_from_closes(closes)
         if pct is not None:
-            return pct, t, None
-        if err:
-            errors.append(f"{t}: {err}")
-    return None, None, "; ".join(errors) if errors else "Yahoo failed"
+            return pct, sym
+    return None, None
 
-# ========== TradingEconomics fallback ==========
+# ========== TE fallback ==========
 def te_get_json(url: str) -> Optional[object]:
     try:
         r = requests.get(url, headers=HTTP_HEADERS, timeout=45)
@@ -217,7 +229,7 @@ def pick_best_match(items: List[dict], keywords: List[str]) -> Optional[dict]:
     candidates.sort(key=lambda x: len(str(x.get("Name",""))))
     return candidates[0]
 
-def te_weekly_from_snapshot(found: dict) -> Optional[float]:
+def te_weekly_snapshot(found: dict) -> Optional[float]:
     w = found.get("WeeklyPercentualChange")
     if w is None:
         return None
@@ -245,50 +257,51 @@ def compute_unified_index(per_item: Dict[str, Dict]) -> int:
 def main():
     now = now_ksa_str()
     state = load_state()
-    all_te = te_fetch_all_commodities()
+    te_all = te_fetch_all_commodities()
 
     per_item: Dict[str, Dict] = {}
 
     for item in COMMODITIES:
-        # 1) Yahoo أولاً (لأنه حل مشكلتك فعليًا)
         pct = None
-        used = None
+        src = None
         reason = None
 
-        if item in YF_TICKERS:
-            pct, used, reason = weekly_from_yahoo_list(YF_TICKERS[item])
+        # 1) Stooq first
+        syms = STOOQ_SYMBOLS.get(item, [])
+        if syms:
+            pct, used = weekly_from_stooq_list(syms)
+            if pct is not None:
+                src = f"Stooq ({used})"
 
-        if pct is not None:
-            prev_week = state.get("last_week_pct", {}).get(item, pct)
-            delta = float(pct) - float(prev_week)
+        # 2) TE fallback (snapshot weekly)
+        if pct is None:
+            found = pick_best_match(te_all, MATCH_KEYWORDS.get(item, []))
+            if found:
+                w = te_weekly_snapshot(found)
+                if w is not None:
+                    pct = w
+                    src = f"TE ({found.get('Name')})"
+                else:
+                    reason = "TE لا يعطي WeeklyPercentualChange لهذه السلعة في وضع guest"
+            else:
+                reason = "لم يتم العثور على السلعة في TE snapshot"
+
+        if pct is None:
             per_item[item] = {
-                "week_pct": float(pct),
-                "level": level_from_weekly_change(float(pct)),
-                "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
-                "src": f"Yahoo ({used})",
+                "week_pct": None,
+                "level": "⚪ غير متاح",
+                "reason": reason or "لم تتوفر بيانات من Stooq/TE",
             }
             continue
 
-        # 2) TE fallback
-        found = pick_best_match(all_te, MATCH_KEYWORDS.get(item, []))
-        if found:
-            w = te_weekly_from_snapshot(found)
-            if w is not None:
-                prev_week = state.get("last_week_pct", {}).get(item, w)
-                delta = float(w) - float(prev_week)
-                per_item[item] = {
-                    "week_pct": float(w),
-                    "level": level_from_weekly_change(float(w)),
-                    "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
-                    "src": f"TE ({found.get('Name')})",
-                }
-                continue
+        prev = state.get("last_week_pct", {}).get(item, pct)
+        delta = float(pct) - float(prev)
 
-        # 3) إذا فشل الكل
         per_item[item] = {
-            "week_pct": None,
-            "level": "⚪ غير متاح",
-            "reason": reason or "لا توجد بيانات أسبوعية من Yahoo/TE",
+            "week_pct": float(pct),
+            "level": level_from_weekly_change(float(pct)),
+            "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
+            "src": src,
         }
 
     ranked = [(k, v["week_pct"], v["level"]) for k, v in per_item.items() if v.get("week_pct") is not None]
@@ -360,7 +373,6 @@ def main():
 
     tg_send_message("\n".join(lines))
 
-    # Save state
     state["last_unified"] = unified
     state.setdefault("last_week_pct", {})
     for item in COMMODITIES:
