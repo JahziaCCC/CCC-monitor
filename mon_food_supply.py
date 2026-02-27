@@ -10,11 +10,9 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "food_supply_state.json"
 
-# TradingEconomics
 TE_API_KEY = os.getenv("TE_API_KEY", "guest:guest")
 TE_BASE = "https://api.tradingeconomics.com"
 
-# --- سلعك ---
 COMMODITIES = [
     "القمح",
     "الأرز",
@@ -26,28 +24,28 @@ COMMODITIES = [
     "الأعلاف",
 ]
 
-# مطابقة أسماء TE
+# Yahoo tickers (أساسي)
+# ملاحظة: "حليب بودرة" صعب كـ سعر مباشر مجاني؛ نحطه Proxies (MILK/DAIRY) لو توفر، وإلا يرجع TE.
+YF_TICKERS = {
+    "القمح": ["ZW=F", "WEAT"],          # Wheat futures / ETF proxy
+    "الأرز": ["ZR=F"],                  # Rough Rice futures
+    "الذرة": ["ZC=F", "CORN"],          # Corn futures / ETF proxy
+    "الشعير": ["ZC=F", "ZW=F"],         # proxy
+    "الزيت النباتي": ["BO=F", "SOYB"],  # Soybean oil futures / soybean ETF proxy
+    "السكر": ["SB=F", "CANE"],          # Sugar futures / ETF proxy
+    "الأعلاف": ["ZM=F", "ZC=F"],        # Soybean Meal futures, fallback corn
+    "حليب بودرة": ["MILK", "DAIRY"],    # proxies (قد تتوفر أو لا)
+}
+
 MATCH_KEYWORDS = {
     "القمح": ["wheat"],
     "الأرز": ["rice"],
     "الذرة": ["corn", "maize"],
     "الشعير": ["barley"],
-    "الزيت النباتي": ["palm oil", "soybean oil", "rapeseed oil", "sunflower oil", "vegetable oil", "canola oil"],
+    "الزيت النباتي": ["palm oil", "soybean oil", "rapeseed oil", "sunflower oil", "vegetable oil"],
     "السكر": ["sugar"],
-    "حليب بودرة": ["milk powder", "skim milk powder", "whole milk powder", "milk", "dairy"],
+    "حليب بودرة": ["milk", "dairy", "milk powder"],
     "الأعلاف": ["soybean meal", "feed", "corn", "wheat"],
-}
-
-# --- Yahoo Finance fallback tickers (قوية ومجانية) ---
-YF_TICKERS = {
-    "القمح": ["ZW=F"],          # Wheat Futures
-    "الأرز": ["ZR=F"],          # Rough Rice Futures
-    "الذرة": ["ZC=F"],          # Corn Futures
-    "السكر": ["SB=F"],          # Sugar Futures
-    "الزيت النباتي": ["BO=F"],  # Soybean Oil Futures (proxy قوي للزيوت)
-    "الشعير": ["ZC=F", "ZW=F"], # proxy
-    "الأعلاف": ["ZM=F", "ZC=F"],# Soybean Meal Futures, ثم corn
-    # حليب بودرة: ما له ticker مجاني ثابت وموثوق؛ نخليه حسب TE فقط
 }
 
 FLAGS = {
@@ -85,9 +83,15 @@ WEIGHTS = {
     "حليب بودرة": 0.06,
 }
 
-# مستويات الخطر الأسبوعية
 THRESH_MED = 2.0
 THRESH_HIGH = 5.0
+
+# ====== Requests headers (مهم جدًا للياهو) ======
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+}
 
 # ========== Telegram ==========
 def tg_send_message(text: str) -> None:
@@ -126,7 +130,7 @@ def level_from_weekly_change(pct: float) -> str:
         return "🟠 متوسط"
     return "🟢 طبيعي"
 
-def trend_arrow(delta: int) -> str:
+def trend_arrow(delta: float) -> str:
     if delta > 0:
         return "↑ يتصاعد"
     if delta < 0:
@@ -143,10 +147,50 @@ def overall_level(idx: int) -> str:
 def format_exposure(names: List[str]) -> str:
     return " | ".join([f"{FLAGS.get(n,'')} {n}".strip() for n in names])
 
-# ========== TradingEconomics ==========
+# ========== Yahoo Finance ==========
+def yf_weekly_change(ticker: str) -> Tuple[Optional[float], Optional[str]]:
+    """
+    يرجع (pct, error)
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {"interval": "1d", "range": "1mo"}  # شهر لضمان وجود 8+ إغلاقات تداول
+    try:
+        r = requests.get(url, params=params, headers=HTTP_HEADERS, timeout=45)
+        if r.status_code != 200:
+            return None, f"Yahoo HTTP {r.status_code}"
+        js = r.json()
+        result = js.get("chart", {}).get("result", [])
+        if not result:
+            return None, "Yahoo no result"
+        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        closes = [float(x) for x in closes if x is not None]
+        if len(closes) < 8:
+            return None, "Yahoo not enough data"
+        last = closes[-1]
+        prev = closes[-8]
+        if prev == 0:
+            return None, "Yahoo prev=0"
+        return ((last - prev) / prev) * 100.0, None
+    except Exception as e:
+        return None, f"Yahoo error: {type(e).__name__}"
+
+def weekly_from_yahoo_list(tickers: List[str]) -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """
+    يرجع (pct, used_ticker, error_summary)
+    """
+    errors = []
+    for t in tickers:
+        pct, err = yf_weekly_change(t)
+        if pct is not None:
+            return pct, t, None
+        if err:
+            errors.append(f"{t}: {err}")
+    return None, None, "; ".join(errors) if errors else "Yahoo failed"
+
+# ========== TradingEconomics fallback ==========
 def te_get_json(url: str) -> Optional[object]:
     try:
-        r = requests.get(url, timeout=45)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=45)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -170,97 +214,17 @@ def pick_best_match(items: List[dict], keywords: List[str]) -> Optional[dict]:
             candidates.append(it)
     if not candidates:
         return None
-    # prefer shortest name (usually the main instrument)
     candidates.sort(key=lambda x: len(str(x.get("Name",""))))
     return candidates[0]
 
-def extract_symbol(it: dict) -> Optional[str]:
-    # TE قد يستخدم أكثر من حقل
-    for k in ["Symbol", "symbol", "Ticker", "ticker", "Code", "code", "HistoricalDataSymbol", "historicalDataSymbol"]:
-        v = it.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
-
-def extract_weekly_from_snapshot(it: dict) -> Optional[float]:
-    w = it.get("WeeklyPercentualChange")
+def te_weekly_from_snapshot(found: dict) -> Optional[float]:
+    w = found.get("WeeklyPercentualChange")
     if w is None:
         return None
     try:
         return float(w)
-    except Exception:
+    except:
         return None
-
-def te_weekly_from_historical(symbol: str) -> Optional[float]:
-    """
-    يحاول جلب تاريخ أسعار (close) وحساب التغير على ~7 جلسات تداول.
-    TradingEconomics markets historical endpoint موجود رسميًا.  [oai_citation:2‡Trading Economics API](https://docs.tradingeconomics.com/markets/historical/?utm_source=chatgpt.com)
-    """
-    # جرّب صيغ محتملة للـ endpoint (التوثيق يختلف حسب الـ symbol)
-    candidates = [
-        f"{TE_BASE}/markets/historical/{symbol}?c={TE_API_KEY}&f=json",
-        f"{TE_BASE}/markets/historical/{symbol}:commodity?c={TE_API_KEY}&f=json",
-        f"{TE_BASE}/markets/historical/{symbol}/commodity?c={TE_API_KEY}&f=json",
-    ]
-    for url in candidates:
-        data = te_get_json(url)
-        if not isinstance(data, list) or len(data) < 8:
-            continue
-
-        # نحاول استخراج close/price
-        closes = []
-        for row in data:
-            if not isinstance(row, dict):
-                continue
-            for ck in ["Close", "close", "Price", "price", "Value", "value", "Observed", "observed", "Last", "last"]:
-                if row.get(ck) is not None:
-                    try:
-                        closes.append(float(row.get(ck)))
-                        break
-                    except Exception:
-                        pass
-
-        if len(closes) >= 8:
-            last = closes[-1]
-            prev = closes[-8]
-            if prev != 0:
-                return ((last - prev) / prev) * 100.0
-
-    return None
-
-# ========== Yahoo Finance fallback ==========
-def yf_chart_closes(ticker: str) -> Optional[List[float]]:
-    """
-    Yahoo chart endpoint: /v8/finance/chart/{symbol}.  [oai_citation:3‡Hexdocs](https://hexdocs.pm/quant/Quant.Explorer.Providers.YahooFinance.html?utm_source=chatgpt.com)
-    """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {"interval": "1d", "range": "15d"}  # enough for 7 trading days
-    try:
-        r = requests.get(url, params=params, timeout=45)
-        r.raise_for_status()
-        js = r.json()
-        result = js.get("chart", {}).get("result", [])
-        if not result:
-            return None
-        closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        # clean None values
-        closes = [float(x) for x in closes if x is not None]
-        if len(closes) < 8:
-            return None
-        return closes
-    except Exception:
-        return None
-
-def weekly_from_yahoo(tickers: List[str]) -> Tuple[Optional[float], Optional[str]]:
-    for t in tickers:
-        closes = yf_chart_closes(t)
-        if not closes:
-            continue
-        last = closes[-1]
-        prev = closes[-8]
-        if prev != 0:
-            return ((last - prev) / prev) * 100.0, t
-    return None, None
 
 # ========== Unified index ==========
 def compute_unified_index(per_item: Dict[str, Dict]) -> int:
@@ -281,55 +245,50 @@ def compute_unified_index(per_item: Dict[str, Dict]) -> int:
 def main():
     now = now_ksa_str()
     state = load_state()
+    all_te = te_fetch_all_commodities()
 
-    all_comms = te_fetch_all_commodities()
     per_item: Dict[str, Dict] = {}
 
     for item in COMMODITIES:
-        found = pick_best_match(all_comms, MATCH_KEYWORDS.get(item, []))
+        # 1) Yahoo أولاً (لأنه حل مشكلتك فعليًا)
+        pct = None
+        used = None
+        reason = None
 
-        src_name = found.get("Name") if found else None
-        symbol = extract_symbol(found) if found else None
+        if item in YF_TICKERS:
+            pct, used, reason = weekly_from_yahoo_list(YF_TICKERS[item])
 
-        # 1) try snapshot weekly
-        week_pct = extract_weekly_from_snapshot(found) if found else None
-        src_mode = "TE-snapshot"
-
-        # 2) try TE historical compute if missing
-        if week_pct is None and symbol:
-            w2 = te_weekly_from_historical(symbol)
-            if w2 is not None:
-                week_pct = w2
-                src_mode = "TE-historical"
-
-        # 3) fallback to Yahoo Finance for key commodities if still missing
-        yf_used = None
-        if week_pct is None and item in YF_TICKERS:
-            w3, yf_used = weekly_from_yahoo(YF_TICKERS[item])
-            if w3 is not None:
-                week_pct = w3
-                src_mode = "Yahoo"
-
-        if week_pct is None:
+        if pct is not None:
+            prev_week = state.get("last_week_pct", {}).get(item, pct)
+            delta = float(pct) - float(prev_week)
             per_item[item] = {
-                "week_pct": None,
-                "level": "⚪ غير متاح",
-                "src_name": src_name,
-                "src_mode": src_mode,
-                "reason": "المصدر لم يوفّر حقول تغير، ولم ننجح في استخراج تاريخ سعر للحساب الأسبوعي",
+                "week_pct": float(pct),
+                "level": level_from_weekly_change(float(pct)),
+                "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
+                "src": f"Yahoo ({used})",
             }
             continue
 
-        prev_week = state.get("last_week_pct", {}).get(item, week_pct)
-        delta = float(week_pct) - float(prev_week)
+        # 2) TE fallback
+        found = pick_best_match(all_te, MATCH_KEYWORDS.get(item, []))
+        if found:
+            w = te_weekly_from_snapshot(found)
+            if w is not None:
+                prev_week = state.get("last_week_pct", {}).get(item, w)
+                delta = float(w) - float(prev_week)
+                per_item[item] = {
+                    "week_pct": float(w),
+                    "level": level_from_weekly_change(float(w)),
+                    "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
+                    "src": f"TE ({found.get('Name')})",
+                }
+                continue
 
+        # 3) إذا فشل الكل
         per_item[item] = {
-            "week_pct": float(week_pct),
-            "level": level_from_weekly_change(float(week_pct)),
-            "trend": f"{trend_arrow(1 if delta>0 else (-1 if delta<0 else 0))} ({delta:+.1f}%)",
-            "src_name": src_name,
-            "src_mode": src_mode,
-            "yf": yf_used,
+            "week_pct": None,
+            "level": "⚪ غير متاح",
+            "reason": reason or "لا توجد بيانات أسبوعية من Yahoo/TE",
         }
 
     ranked = [(k, v["week_pct"], v["level"]) for k, v in per_item.items() if v.get("week_pct") is not None]
@@ -375,19 +334,12 @@ def main():
 
         if pct is None:
             lines.append(f"• {item}: {lvl} | بيانات سعر غير متاحة حاليًا")
-            if v.get("src_name"):
-                lines.append(f"  مصدر TE: {v['src_name']}")
             if v.get("reason"):
                 lines.append(f"  السبب: {v['reason']}")
         else:
             lines.append(f"• {item}: {lvl} | {pct:+.1f}% (7d) | {tr}")
-            if v.get("src_mode") == "Yahoo" and v.get("yf"):
-                lines.append(f"  مصدر: Yahoo ({v['yf']})")
-            elif v.get("src_mode") == "TE-historical":
-                lines.append("  مصدر: TradingEconomics (Historical)")
-            else:
-                if v.get("src_name"):
-                    lines.append(f"  مصدر TE: {v['src_name']}")
+            if v.get("src"):
+                lines.append(f"  مصدر: {v['src']}")
 
         if exp:
             lines.append(f"  دول التعرض: {exp}")
