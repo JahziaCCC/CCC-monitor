@@ -1,9 +1,7 @@
-# mon_food_supply.py
 import os
 import json
 import datetime
 from typing import Dict, List, Optional, Tuple
-
 import requests
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -12,10 +10,7 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "food_supply_state.json"
 
-# Trading Economics (يدعم weekly change جاهز)
-# docs: /markets/commodities و /markets/search/{term} مع category=commodity
-# https://api.tradingeconomics.com/markets/commodities?c=API_KEY
-# https://api.tradingeconomics.com/markets/search/wheat?c=API_KEY&category=commodity&f=json
+# TradingEconomics
 TE_API_KEY = os.getenv("TE_API_KEY", "guest:guest")
 TE_BASE = "https://api.tradingeconomics.com"
 
@@ -33,17 +28,16 @@ COMMODITIES = [
     "الأعلاف",
 ]
 
-# مصطلحات البحث داخل TradingEconomics لكل سلعة
-# (نجرّب أكثر من term ونأخذ أول نتيجة "Name" مناسبة)
-TE_TERMS = {
+# كلمات مطابقة داخل Names في TradingEconomics (نطابق من قائمة commodities كاملة)
+MATCH_KEYWORDS = {
     "القمح": ["wheat"],
     "الأرز": ["rice"],
-    "الذرة": ["corn"],
+    "الذرة": ["corn", "maize"],
     "الشعير": ["barley"],
-    "الزيت النباتي": ["soybean oil", "palm oil", "rapeseed oil"],
+    "الزيت النباتي": ["soybean oil", "palm oil", "rapeseed oil", "sunflower oil", "vegetable oil"],
     "السكر": ["sugar"],
-    "حليب بودرة": ["skim milk powder", "milk powder", "dairy"],
-    "الأعلاف": ["soybean meal", "feed", "corn"],  # لو ما لقى feed نستخدم soybean meal أو corn كبديل
+    "حليب بودرة": ["milk", "skimmed milk powder", "whole milk powder", "milk powder", "dairy"],
+    "الأعلاف": ["soybean meal", "feed", "corn", "wheat"],  # بدائل
 }
 
 # =========================
@@ -68,9 +62,9 @@ EXPOSURE = {
     "الأرز": ["الهند", "باكستان"],
     "الشعير": ["روسيا", "أوكرانيا"],
     "الأعلاف": ["روسيا", "أوكرانيا"],
-    "الزيت النباتي": ["إندونيسيا", "ماليزيا"],
-    "السكر": ["البرازيل", "الهند"],
-    "حليب بودرة": ["نيوزيلندا"],
+    "الزيت النباتي": ["إندونيسيا", "ماليزيا"],  # مهم جدًا للزيوت
+    "السكر": ["البرازيل", "الهند"],             # مهم جدًا للسكر
+    "حليب بودرة": ["نيوزيلندا"],                # مرجع قوي للألبان
 }
 
 # =========================
@@ -155,9 +149,9 @@ def format_exposure(names: List[str]) -> str:
     return " | ".join(parts)
 
 # =========================
-# TradingEconomics fetch
+# TradingEconomics
 # =========================
-def te_get_json(url: str) -> Optional[dict]:
+def te_get_json(url: str) -> Optional[object]:
     try:
         r = requests.get(url, timeout=40)
         r.raise_for_status()
@@ -165,52 +159,39 @@ def te_get_json(url: str) -> Optional[dict]:
     except Exception:
         return None
 
-def te_search_best(term: str) -> Optional[dict]:
-    """
-    يبحث في TE ويعيد أفضل نتيجة commodity لها WeeklyPercentualChange
-    """
-    t = term.replace(" ", "%20")
-    url = f"{TE_BASE}/markets/search/{t}?c={TE_API_KEY}&category=commodity&f=json"
+def te_fetch_all_commodities() -> List[dict]:
+    # هذا الـ endpoint يعيد قائمة commodities مع WeeklyPercentualChange عادة.  [oai_citation:1‡Trading Economics API](https://docs.tradingeconomics.com/markets/snapshot/?utm_source=chatgpt.com)
+    url = f"{TE_BASE}/markets/commodities?c={TE_API_KEY}&f=json"
     data = te_get_json(url)
-    if not data or not isinstance(data, list):
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+def pick_best_match(items: List[dict], keywords: List[str]) -> Optional[dict]:
+    """
+    يختار أفضل عنصر commodity من القائمة بناءً على keywords في Name
+    ويشترط وجود WeeklyPercentualChange
+    """
+    if not items:
         return None
-
-    # خذ أول عنصر عنده Name و WeeklyPercentualChange (أغلب الوقت هو المطلوب)
-    for item in data:
-        if not isinstance(item, dict):
+    kws = [k.lower() for k in keywords]
+    candidates = []
+    for it in items:
+        name = str(it.get("Name", "")).lower()
+        if not name:
             continue
-        if item.get("Type") not in (None, "", "commodity"):
-            # بعض الردود ما تعطي Type بشكل ثابت، فنتساهل
-            pass
-        if item.get("Name") and (item.get("WeeklyPercentualChange") is not None):
-            return item
+        if any(k in name for k in kws):
+            w = it.get("WeeklyPercentualChange")
+            if w is None:
+                continue
+            candidates.append(it)
 
-    # fallback: أول عنصر حتى لو ما فيه weekly (نحاول لاحقاً)
-    for item in data:
-        if isinstance(item, dict) and item.get("Name"):
-            return item
+    # لو وجدنا مرشحين، خذ الأقرب (الأقصر اسمًا عادة أكثر دقة)
+    if candidates:
+        candidates.sort(key=lambda x: len(str(x.get("Name", ""))))
+        return candidates[0]
 
     return None
-
-def te_pick_commodity(ar_item: str) -> Tuple[Optional[float], Optional[str], Optional[str]]:
-    """
-    يرجع (weekly_pct, name, url)
-    """
-    terms = TE_TERMS.get(ar_item, [])
-    for term in terms:
-        found = te_search_best(term)
-        if not found:
-            continue
-        w = found.get("WeeklyPercentualChange")
-        name = found.get("Name")
-        url = found.get("URL")
-        if w is None:
-            continue
-        try:
-            return float(w), str(name), str(url)
-        except Exception:
-            continue
-    return None, None, None
 
 # =========================
 # Unified index
@@ -222,7 +203,6 @@ def compute_unified_index(per_item: Dict[str, Dict]) -> int:
     """
     score = 0.0
     total_w = 0.0
-
     for k, w in WEIGHTS.items():
         pct = per_item.get(k, {}).get("week_pct")
         if pct is None:
@@ -230,7 +210,6 @@ def compute_unified_index(per_item: Dict[str, Dict]) -> int:
         item_score = clamp((pct / 10.0) * 100.0, 0.0, 100.0)
         score += w * item_score
         total_w += w
-
     if total_w == 0:
         return 0
     return int(round(clamp(score / total_w, 0, 100)))
@@ -242,34 +221,37 @@ def main():
     now = now_ksa_str()
     state = load_state()
 
+    all_comms = te_fetch_all_commodities()
+
     per_item: Dict[str, Dict] = {}
 
-    # جلب weekly change لكل سلعة من TE
     for item in COMMODITIES:
-        week_pct, te_name, te_url = te_pick_commodity(item)
+        kw = MATCH_KEYWORDS.get(item, [])
+        found = pick_best_match(all_comms, kw)
+
+        if not found:
+            per_item[item] = {"week_pct": None, "level": "⚪ غير متاح"}
+            continue
+
+        try:
+            week_pct = float(found.get("WeeklyPercentualChange"))
+        except Exception:
+            week_pct = None
 
         if week_pct is None:
-            per_item[item] = {
-                "week_pct": None,
-                "level": "⚪ غير متاح",
-                "source": "TE",
-                "name": te_name,
-                "url": te_url,
-            }
-        else:
-            prev_week = state.get("last_week_pct", {}).get(item, week_pct)
-            delta = float(week_pct) - float(prev_week)
+            per_item[item] = {"week_pct": None, "level": "⚪ غير متاح"}
+            continue
 
-            per_item[item] = {
-                "week_pct": float(week_pct),
-                "level": level_from_weekly_change(float(week_pct)),
-                "source": "TE",
-                "name": te_name,
-                "url": te_url,
-                "trend": f"{trend_arrow(1 if delta>0 else (-1 if delta<0 else 0))} ({delta:+.1f}%)",
-            }
+        prev_week = state.get("last_week_pct", {}).get(item, week_pct)
+        delta = float(week_pct) - float(prev_week)
 
-    # أعلى 3 ضغطًا
+        per_item[item] = {
+            "week_pct": float(week_pct),
+            "level": level_from_weekly_change(float(week_pct)),
+            "trend": f"{trend_arrow(1 if delta>0 else (-1 if delta<0 else 0))} ({delta:+.1f}%)",
+            "src_name": found.get("Name"),
+        }
+
     ranked = []
     for item, v in per_item.items():
         if v.get("week_pct") is None:
@@ -283,7 +265,6 @@ def main():
     overall_tr = f"{trend_arrow(delta_unified)} ({delta_unified:+d})"
     overall_lvl = overall_level(unified)
 
-    # بناء التقرير
     lines = []
     lines.append("🍞📦 رصد سلاسل إمداد الغذاء (B++ أسبوعي – Level 1) – المملكة العربية السعودية")
     lines.append(f"🕒 {now}")
@@ -335,8 +316,7 @@ def main():
         lines.append("• استمرار الرصد الأسبوعي حسب الجدولة.")
         lines.append("• رفع التنبيه عند تغيرات ≥ +5% خلال 7 أيام.")
 
-    report = "\n".join(lines)
-    tg_send_message(report)
+    tg_send_message("\n".join(lines))
 
     # حفظ الحالة
     state["last_unified"] = unified
