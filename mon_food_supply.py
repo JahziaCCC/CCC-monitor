@@ -1,10 +1,8 @@
 # mon_food_supply.py
 import os
-import io
 import json
-import csv
 import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -13,6 +11,13 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "food_supply_state.json"
+
+# Trading Economics (يدعم weekly change جاهز)
+# docs: /markets/commodities و /markets/search/{term} مع category=commodity
+# https://api.tradingeconomics.com/markets/commodities?c=API_KEY
+# https://api.tradingeconomics.com/markets/search/wheat?c=API_KEY&category=commodity&f=json
+TE_API_KEY = os.getenv("TE_API_KEY", "guest:guest")
+TE_BASE = "https://api.tradingeconomics.com"
 
 # =========================
 # السلع (بعد الاستبعاد)
@@ -28,29 +33,21 @@ COMMODITIES = [
     "الأعلاف",
 ]
 
-# =========================
-# مصادر الأسعار الأسبوعية (Proxies)
-# Stooq رموز قد تختلف؛ لذلك وضعنا بدائل.
-# الكود يجرب بالترتيب ويأخذ أول رمز يعطي بيانات.
-# =========================
-PRICE_PROXIES = {
-    "القمح":        ["zw.f", "0ap.f", "0aw.f"],   # CBOT Wheat / Wheat alt
-    "الذرة":        ["zc.f", "0aq.f"],            # CBOT Corn / Rice alt (fallback)
-    "الأرز":        ["zr.f", "0au.f", "0aq.f"],   # Rough Rice / Japonica / Indica
-    "الزيت النباتي": ["zl.f", "0ay.f"],           # Soybean Oil / Rapeseed Oil
-    "السكر":        ["sb.f", "0am.f"],            # Sugar (raw) / Sugar white
-    "حليب بودرة":   ["dxy", "eurusd"],            # لا يوجد مرجع مجاني ثابت — placeholder (سنوضح إن غير متاح)
-    "الشعير":       ["zc.f", "zw.f"],             # Proxy: corn/wheat
-    "الأعلاف":      ["zc.f", "zw.f"],             # Proxy: corn/wheat
+# مصطلحات البحث داخل TradingEconomics لكل سلعة
+# (نجرّب أكثر من term ونأخذ أول نتيجة "Name" مناسبة)
+TE_TERMS = {
+    "القمح": ["wheat"],
+    "الأرز": ["rice"],
+    "الذرة": ["corn"],
+    "الشعير": ["barley"],
+    "الزيت النباتي": ["soybean oil", "palm oil", "rapeseed oil"],
+    "السكر": ["sugar"],
+    "حليب بودرة": ["skim milk powder", "milk powder", "dairy"],
+    "الأعلاف": ["soybean meal", "feed", "corn"],  # لو ما لقى feed نستخدم soybean meal أو corn كبديل
 }
 
-# FAO (داعم عالمي)
-FAO_FPI_URL = "https://www.fao.org/worldfoodsituation/foodpricesindex/en"
-
 # =========================
-# تعرّض الموردين (Countries Exposure)
-# طلبك: الهند، باكستان، مصر، تركيا، روسيا، أوكرانيا
-# + اقتراحات مهمة: إندونيسيا/ماليزيا (زيوت) ، البرازيل (سكر) ، نيوزيلندا (ألبان)
+# تعرّض الموردين (Exposure)
 # =========================
 FLAGS = {
     "الهند": "🇮🇳",
@@ -71,19 +68,14 @@ EXPOSURE = {
     "الأرز": ["الهند", "باكستان"],
     "الشعير": ["روسيا", "أوكرانيا"],
     "الأعلاف": ["روسيا", "أوكرانيا"],
-    "الزيت النباتي": ["إندونيسيا", "ماليزيا"],  # اقتراح مهم جدًا للزيوت
-    "السكر": ["البرازيل", "الهند"],             # اقتراح مهم جدًا للسكر
-    "حليب بودرة": ["نيوزيلندا"],                # مرجع عالمي قوي للألبان
+    "الزيت النباتي": ["إندونيسيا", "ماليزيا"],
+    "السكر": ["البرازيل", "الهند"],
+    "حليب بودرة": ["نيوزيلندا"],
 }
 
 # =========================
-# إعدادات التقييم (أسبوعي)
+# أوزان المؤشر
 # =========================
-# مستويات الخطر حسب تغير 7 أيام
-THRESH_MED = 2.0   # >= 2% = 🟠
-THRESH_HIGH = 5.0  # >= 5% = 🔴
-
-# وزن كل سلعة في المؤشر الموحد
 WEIGHTS = {
     "القمح": 0.22,
     "الأرز": 0.14,
@@ -94,6 +86,10 @@ WEIGHTS = {
     "السكر": 0.08,
     "حليب بودرة": 0.06,
 }
+
+# مستويات الخطر حسب WeeklyPercentualChange
+THRESH_MED = 2.0   # >= 2% = 🟠
+THRESH_HIGH = 5.0  # >= 5% = 🔴
 
 # =========================
 # Telegram
@@ -138,7 +134,7 @@ def level_from_weekly_change(pct: float) -> str:
         return "🟠 متوسط"
     return "🟢 طبيعي"
 
-def trend_arrow(delta: float) -> str:
+def trend_arrow(delta: int) -> str:
     if delta > 0:
         return "↑ يتصاعد"
     if delta < 0:
@@ -152,104 +148,83 @@ def overall_level(idx: int) -> str:
         return "🟠 ضغط متوسط"
     return "🟢 طبيعي"
 
-# =========================
-# Stooq download
-# =========================
-def _stooq_urls(symbol: str) -> List[str]:
-    s = symbol.lower()
-    # نماذج شائعة للتنزيل CSV
-    return [
-        f"https://stooq.com/q/d/l/?s={s}&i=d",
-        f"https://stooq.com/q/d/l/?s={s}&i=d&c=0",
-        f"https://stooq.com/q/d/?s={s}&c=0",
-    ]
-
-def fetch_stooq_daily_close(symbol: str, days_needed: int = 10) -> Optional[List[Tuple[str, float]]]:
-    """
-    يرجع قائمة (date, close) مرتبة تصاعديًا.
-    """
-    for url in _stooq_urls(symbol):
-        try:
-            r = requests.get(url, timeout=40)
-            if r.status_code != 200:
-                continue
-            text = r.text.strip()
-            if "Date" not in text and "date" not in text:
-                continue
-
-            reader = csv.DictReader(io.StringIO(text))
-            rows = []
-            for row in reader:
-                d = (row.get("Date") or row.get("date") or "").strip()
-                c = (row.get("Close") or row.get("close") or "").strip()
-                if not d or not c:
-                    continue
-                try:
-                    close = float(c)
-                except:
-                    continue
-                rows.append((d, close))
-
-            if len(rows) >= days_needed:
-                rows.sort(key=lambda x: x[0])
-                return rows
-        except Exception:
-            continue
-
-    return None
-
-def weekly_change_from_series(series: List[Tuple[str, float]]) -> Optional[float]:
-    """
-    يحسب تغير 7 أيام تقريبًا (آخر 6-7 جلسات تداول).
-    نأخذ آخر قيمة ونقارنها بقيمة قبل 7 أيام تداول (أو أقرب).
-    """
-    if not series or len(series) < 8:
-        return None
-    last = series[-1][1]
-    prev = series[-8][1]  # ~7 trading days ago
-    if prev == 0:
-        return None
-    return ((last - prev) / prev) * 100.0
-
-# =========================
-# FAO (داعم)
-# =========================
-def fetch_fao_overall_value() -> Optional[float]:
-    """
-    استخراج رقم تقريبي للمؤشر العام فقط (داعم).
-    """
-    try:
-        r = requests.get(FAO_FPI_URL, timeout=40)
-        r.raise_for_status()
-        html = r.text
-        import re
-        m = re.search(r'Food Price Index.*?([0-9]{2,3}\.?[0-9]?)', html, re.S)
-        if m:
-            return float(m.group(1))
-    except Exception:
-        pass
-    return None
-
-# =========================
-# Build report
-# =========================
 def format_exposure(names: List[str]) -> str:
     parts = []
     for n in names:
         parts.append(f"{FLAGS.get(n,'')} {n}".strip())
     return " | ".join(parts)
 
+# =========================
+# TradingEconomics fetch
+# =========================
+def te_get_json(url: str) -> Optional[dict]:
+    try:
+        r = requests.get(url, timeout=40)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+def te_search_best(term: str) -> Optional[dict]:
+    """
+    يبحث في TE ويعيد أفضل نتيجة commodity لها WeeklyPercentualChange
+    """
+    t = term.replace(" ", "%20")
+    url = f"{TE_BASE}/markets/search/{t}?c={TE_API_KEY}&category=commodity&f=json"
+    data = te_get_json(url)
+    if not data or not isinstance(data, list):
+        return None
+
+    # خذ أول عنصر عنده Name و WeeklyPercentualChange (أغلب الوقت هو المطلوب)
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("Type") not in (None, "", "commodity"):
+            # بعض الردود ما تعطي Type بشكل ثابت، فنتساهل
+            pass
+        if item.get("Name") and (item.get("WeeklyPercentualChange") is not None):
+            return item
+
+    # fallback: أول عنصر حتى لو ما فيه weekly (نحاول لاحقاً)
+    for item in data:
+        if isinstance(item, dict) and item.get("Name"):
+            return item
+
+    return None
+
+def te_pick_commodity(ar_item: str) -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """
+    يرجع (weekly_pct, name, url)
+    """
+    terms = TE_TERMS.get(ar_item, [])
+    for term in terms:
+        found = te_search_best(term)
+        if not found:
+            continue
+        w = found.get("WeeklyPercentualChange")
+        name = found.get("Name")
+        url = found.get("URL")
+        if w is None:
+            continue
+        try:
+            return float(w), str(name), str(url)
+        except Exception:
+            continue
+    return None, None, None
+
+# =========================
+# Unified index
+# =========================
 def compute_unified_index(per_item: Dict[str, Dict]) -> int:
     """
-    يحول تغيرات أسبوعية إلى مؤشر 0-100.
-    قاعدة بسيطة: 0% => 0 ، 10% => 100 (مقصوص).
+    تحويل تغير أسبوعي إلى مؤشر 0-100:
+    0% => 0 ، 10% => 100 (قص)
     """
     score = 0.0
     total_w = 0.0
+
     for k, w in WEIGHTS.items():
-        if k not in per_item:
-            continue
-        pct = per_item[k].get("week_pct")
+        pct = per_item.get(k, {}).get("week_pct")
         if pct is None:
             continue
         item_score = clamp((pct / 10.0) * 100.0, 0.0, 100.0)
@@ -260,77 +235,53 @@ def compute_unified_index(per_item: Dict[str, Dict]) -> int:
         return 0
     return int(round(clamp(score / total_w, 0, 100)))
 
+# =========================
+# Main
+# =========================
 def main():
     now = now_ksa_str()
     state = load_state()
 
-    # حساب تغير أسبوعي لكل سلعة (من proxies)
-    per_item = {}
+    per_item: Dict[str, Dict] = {}
 
+    # جلب weekly change لكل سلعة من TE
     for item in COMMODITIES:
-        symbols = PRICE_PROXIES.get(item, [])
-        series_used = None
-        symbol_used = None
-        week_pct = None
-
-        # حليب بودرة: ما عندنا proxy مجاني قوي هنا → نخليه غير متاح (إلى أن نربطه بمصدر مناسب)
-        if item == "حليب بودرة":
-            per_item[item] = {
-                "week_pct": None,
-                "level": "⚪ غير متاح",
-                "symbol": None,
-                "trend": "—",
-            }
-            continue
-
-        for sym in symbols:
-            series = fetch_stooq_daily_close(sym, days_needed=10)
-            if not series:
-                continue
-            pct = weekly_change_from_series(series)
-            if pct is None:
-                continue
-            series_used = series
-            symbol_used = sym
-            week_pct = pct
-            break
+        week_pct, te_name, te_url = te_pick_commodity(item)
 
         if week_pct is None:
             per_item[item] = {
                 "week_pct": None,
                 "level": "⚪ غير متاح",
-                "symbol": symbol_used,
-                "trend": "—",
+                "source": "TE",
+                "name": te_name,
+                "url": te_url,
             }
         else:
             prev_week = state.get("last_week_pct", {}).get(item, week_pct)
-            delta = week_pct - float(prev_week)
+            delta = float(week_pct) - float(prev_week)
 
             per_item[item] = {
                 "week_pct": float(week_pct),
                 "level": level_from_weekly_change(float(week_pct)),
-                "symbol": symbol_used,
-                "trend": f"{trend_arrow(delta)} ({delta:+.1f}%)",
+                "source": "TE",
+                "name": te_name,
+                "url": te_url,
+                "trend": f"{trend_arrow(1 if delta>0 else (-1 if delta<0 else 0))} ({delta:+.1f}%)",
             }
 
-    # أعلى 3 سلع ضغطًا (حسب التغير الأسبوعي)
+    # أعلى 3 ضغطًا
     ranked = []
     for item, v in per_item.items():
         if v.get("week_pct") is None:
             continue
-        ranked.append((item, v["week_pct"], v["level"]))
+        ranked.append((item, float(v["week_pct"]), v.get("level", "")))
     ranked.sort(key=lambda x: x[1], reverse=True)
 
-    # المؤشر الموحد + اتجاهه
     unified = compute_unified_index(per_item)
     prev_unified = int(state.get("last_unified", unified))
     delta_unified = unified - prev_unified
     overall_tr = f"{trend_arrow(delta_unified)} ({delta_unified:+d})"
     overall_lvl = overall_level(unified)
-
-    # FAO (داعم)
-    fao_val = fetch_fao_overall_value()
-    fao_line = f"{fao_val:.1f}" if isinstance(fao_val, float) else "غير متاح"
 
     # بناء التقرير
     lines = []
@@ -370,10 +321,6 @@ def main():
         if exp:
             lines.append(f"  دول التعرض: {exp}")
 
-    lines.append("")
-    lines.append("════════════════════")
-    lines.append("🌍 إشارات عالمية (داعم)")
-    lines.append(f"• مؤشر FAO الغذائي (عام): {fao_line}")
     lines.append("")
     lines.append("════════════════════")
     lines.append("🧭 توصية تشغيلية")
