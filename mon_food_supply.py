@@ -2,6 +2,7 @@ import os
 import io
 import csv
 import json
+import time
 import datetime
 from typing import Dict, List, Optional, Tuple
 import requests
@@ -26,20 +27,19 @@ COMMODITIES = [
     "الأعلاف",
 ]
 
-# ====== Stooq symbols (الأهم) ======
-# Stooq غالباً يشتغل مع i=d
+# Stooq futures symbols
 STOOQ_SYMBOLS = {
     "القمح": ["zw.f"],
     "الأرز": ["zr.f"],
     "الذرة": ["zc.f"],
     "السكر": ["sb.f"],
     "الزيت النباتي": ["zl.f"],   # Soybean Oil proxy
-    "الأعلاف": ["zm.f", "zc.f"], # Soybean Meal ثم Corn
-    "الشعير": ["zb.f", "zw.f", "zc.f"],  # barley قد لا يتوفر → fallback
-    "حليب بودرة": [],  # غالباً غير متاح مجاناً
+    "الأعلاف": ["zm.f", "zc.f"], # Soybean Meal then Corn
+    "الشعير": ["zb.f", "zw.f", "zc.f"],
+    "حليب بودرة": [],
 }
 
-# TE keywords fallback (عندك Corn/Barley شغالة)
+# TE fallback keywords (for items that exist in your guest snapshot)
 MATCH_KEYWORDS = {
     "القمح": ["wheat"],
     "الأرز": ["rice"],
@@ -93,6 +93,7 @@ HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
     "Accept": "text/csv,application/json,text/plain,*/*",
     "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    "Connection": "close",
 }
 
 # ========== Telegram ==========
@@ -150,37 +151,63 @@ def format_exposure(names: List[str]) -> str:
     return " | ".join([f"{FLAGS.get(n,'')} {n}".strip() for n in names])
 
 # ========== Stooq ==========
-def stooq_fetch_series(symbol: str, days_needed: int = 12) -> Optional[List[float]]:
-    # CSV: Date,Open,High,Low,Close,Volume
-    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
-    try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=45)
-        if r.status_code != 200:
-            return None
-        text = r.text.strip()
-        if "Date" not in text or "Close" not in text:
-            return None
+def stooq_urls(symbol: str) -> List[str]:
+    s = symbol.lower()
+    # عدة صيغ لأن بعض البيئات تسقط رابط وتنجح الأخرى
+    return [
+        f"https://stooq.com/q/d/l/?s={s}&i=d",
+        f"https://stooq.com/q/d/l/?s={s}&i=d&c=0",
+        f"https://stooq.com/q/d/l/?s={s}&i=d&c=1",
+        f"https://stooq.pl/q/d/l/?s={s}&i=d",
+        f"https://stooq.pl/q/d/l/?s={s}&i=d&c=0",
+        f"https://stooq.pl/q/d/l/?s={s}&i=d&c=1",
+    ]
 
-        reader = csv.DictReader(io.StringIO(text))
-        closes = []
-        for row in reader:
-            c = row.get("Close")
-            if c is None:
-                continue
+def stooq_fetch_closes(symbol: str, min_rows: int = 12, retries: int = 2) -> Tuple[Optional[List[float]], Optional[str]]:
+    """
+    يرجع (closes, error_reason)
+    """
+    last_err = None
+    for url in stooq_urls(symbol):
+        for attempt in range(retries + 1):
             try:
-                closes.append(float(c))
-            except:
-                pass
+                r = requests.get(url, headers=HTTP_HEADERS, timeout=45)
+                if r.status_code != 200:
+                    last_err = f"Stooq HTTP {r.status_code} ({symbol})"
+                    continue
 
-        closes = [x for x in closes if x is not None]
-        if len(closes) < days_needed:
-            return None
-        return closes
-    except Exception:
-        return None
+                text = r.text.strip()
+                if "Date" not in text or "Close" not in text:
+                    last_err = f"Stooq CSV invalid ({symbol})"
+                    continue
+
+                reader = csv.DictReader(io.StringIO(text))
+                closes = []
+                for row in reader:
+                    c = row.get("Close")
+                    if c is None:
+                        continue
+                    try:
+                        closes.append(float(c))
+                    except:
+                        pass
+
+                if len(closes) < min_rows:
+                    last_err = f"Stooq not enough rows {len(closes)}<{min_rows} ({symbol})"
+                    continue
+
+                return closes, None
+
+            except Exception as e:
+                last_err = f"Stooq error {type(e).__name__} ({symbol})"
+                # محاولة خفيفة (بدون انتظار طويل)
+                if attempt < retries:
+                    time.sleep(0.3)
+                continue
+
+    return None, last_err or f"Stooq failed ({symbol})"
 
 def weekly_change_from_closes(closes: List[float]) -> Optional[float]:
-    # نستخدم آخر 8 إغلاقات (≈ 7 أيام تداول)
     if not closes or len(closes) < 8:
         return None
     last = closes[-1]
@@ -189,15 +216,22 @@ def weekly_change_from_closes(closes: List[float]) -> Optional[float]:
         return None
     return ((last - prev) / prev) * 100.0
 
-def weekly_from_stooq_list(symbols: List[str]) -> Tuple[Optional[float], Optional[str]]:
+def weekly_from_stooq_symbols(symbols: List[str]) -> Tuple[Optional[float], Optional[str], Optional[str]]:
+    """
+    returns (pct, used_symbol, error_summary)
+    """
+    errs = []
     for sym in symbols:
-        closes = stooq_fetch_series(sym, days_needed=12)
-        if not closes:
-            continue
-        pct = weekly_change_from_closes(closes)
-        if pct is not None:
-            return pct, sym
-    return None, None
+        closes, err = stooq_fetch_closes(sym, min_rows=12, retries=2)
+        if closes:
+            pct = weekly_change_from_closes(closes)
+            if pct is not None:
+                return pct, sym, None
+            errs.append(f"{sym}: calc failed")
+        else:
+            if err:
+                errs.append(err)
+    return None, None, "; ".join(errs) if errs else "Stooq failed"
 
 # ========== TE fallback ==========
 def te_get_json(url: str) -> Optional[object]:
@@ -264,14 +298,16 @@ def main():
     for item in COMMODITIES:
         pct = None
         src = None
-        reason = None
+        reason_parts = []
 
         # 1) Stooq first
         syms = STOOQ_SYMBOLS.get(item, [])
         if syms:
-            pct, used = weekly_from_stooq_list(syms)
+            pct, used, stooq_err = weekly_from_stooq_symbols(syms)
             if pct is not None:
                 src = f"Stooq ({used})"
+            else:
+                reason_parts.append(stooq_err or "Stooq failed")
 
         # 2) TE fallback (snapshot weekly)
         if pct is None:
@@ -282,15 +318,15 @@ def main():
                     pct = w
                     src = f"TE ({found.get('Name')})"
                 else:
-                    reason = "TE لا يعطي WeeklyPercentualChange لهذه السلعة في وضع guest"
+                    reason_parts.append("TE guest لا يعطي WeeklyPercentualChange لهذه السلعة")
             else:
-                reason = "لم يتم العثور على السلعة في TE snapshot"
+                reason_parts.append("لم يتم العثور على السلعة في TE snapshot (guest)")
 
         if pct is None:
             per_item[item] = {
                 "week_pct": None,
                 "level": "⚪ غير متاح",
-                "reason": reason or "لم تتوفر بيانات من Stooq/TE",
+                "reason": " | ".join([p for p in reason_parts if p]) or "لا توجد بيانات من Stooq/TE",
             }
             continue
 
