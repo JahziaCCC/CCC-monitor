@@ -1,6 +1,6 @@
 {
   "last_index": 12,
-  "last_unified": 0,
+  "last_unified": 19,
   "last_fao_groups": {
     "cereals": 36.4,
     "oils": 168.6,
@@ -17,6 +17,10 @@
     "حليب بودرة": 0.0,
     "الأعلاف": 0.0
   },
-  "last_update": "2026-02-27 19:24 KSA",
-  "last_week_pct": {}
+  "last_update": "2026-02-27 19:28 KSA",
+  "last_week_pct": {
+    "الذرة": 2.5035,
+    "الشعير": 0.0,
+    "الأعلاف": 2.5035
+  }
 }
