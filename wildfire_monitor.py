@@ -12,7 +12,7 @@ FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "wildfire_state.json"
 
-# ========= مناطق الرصد (Bounding Boxes) =========
+# ========= مناطق الرصد (B) =========
 # bbox format: (min_lon, min_lat, max_lon, max_lat)
 BBOX = {
     "السعودية": (34.5, 16.0, 55.8, 32.6),
@@ -20,10 +20,10 @@ BBOX = {
     "الخليج العربي": (47.0, 22.0, 56.8, 30.8),
 }
 
-# ========= إعدادات رصد =========
+# ========= إعدادات الرصد =========
 LOOKBACK_HOURS = 6          # أحدث 6 ساعات
 MIN_CONFIDENCE = "nominal"  # nominal أو high
-MAX_POINTS_PER_REGION = 300 # حماية
+MAX_POINTS_PER_REGION = 300
 
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
@@ -43,11 +43,8 @@ def firms_url_for_bbox(bbox: Tuple[float, float, float, float], hours: int) -> s
     source = "VIIRS_SNPP_NRT"
     return f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_KEY}/{source}/{bbox_str}/{days}"
 
-def now_ksa() -> datetime.datetime:
-    return datetime.datetime.now(KSA_TZ)
-
 def now_ksa_str() -> str:
-    return now_ksa().strftime("%Y-%m-%d %H:%M KSA")
+    return datetime.datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M KSA")
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -88,26 +85,18 @@ def parse_csv(text: str) -> List[dict]:
 def parse_dt_utc(date_str: str, time_str: str) -> Optional[datetime.datetime]:
     try:
         t = str(time_str).strip()
-
-        # تأكد 4 أرقام
         if len(t) < 4:
             t = t.zfill(4)
 
         hh = int(t[:2])
         mm = int(t[2:])
 
-        # حماية من القيم الغلط
         if hh > 23 or mm > 59:
             return None
 
-        dt = datetime.datetime.fromisoformat(date_str).replace(
-            hour=hh,
-            minute=mm,
-            second=0,
-            microsecond=0,
-            tzinfo=datetime.timezone.utc
+        return datetime.datetime.fromisoformat(date_str).replace(
+            hour=hh, minute=mm, second=0, microsecond=0, tzinfo=datetime.timezone.utc
         )
-        return dt
     except Exception:
         return None
 
@@ -141,10 +130,10 @@ def pass_conf(min_conf: str, bucketed: str) -> bool:
 
 def is_natural_fire(row: dict) -> bool:
     """
-    FIRMS VIIRS type:
-      0 = presumed vegetation fire
+    VIIRS 'type':
+      0 = presumed vegetation fire  ✅ (نعتبرها حرائق طبيعية)
       1 = active volcano
-      2 = other static land source (غالباً gas flares)
+      2 = other static land source (غالباً gas flares / صناعي ثابت)
     """
     t = row.get("type")
     if t is None or t == "":
@@ -154,11 +143,18 @@ def is_natural_fire(row: dict) -> bool:
     except Exception:
         return True
 
-def map_link() -> str:
+def map_link_general() -> str:
+    # رابط عام (لو ما في نقاط)
     return "https://firms.modaps.eosdis.nasa.gov/map/"
 
+def maps_link_google(lat: float, lon: float) -> str:
+    return f"https://www.google.com/maps?q={lat},{lon}"
+
+def maps_link_osm(lat: float, lon: float) -> str:
+    return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=10/{lat}/{lon}"
+
 def summarize_region_name(lat: float, lon: float) -> str:
-    # تقسيم تقريبي لمناطق السعودية
+    # تقسيم تقريبي لمناطق السعودية (للملخص التنفيذي)
     if lat < 20.0 and lon < 45.0:
         return "جنوب غرب المملكة"
     if lat < 20.0 and lon >= 45.0:
@@ -174,9 +170,9 @@ def main():
     prev_count = int(state.get("last_count", 0))
 
     events: List[dict] = []
-    per_region_counts: Dict[str, int] = {k: 0 for k in BBOX.keys()}
+    per_scope_counts: Dict[str, int] = {k: 0 for k in BBOX.keys()}
 
-    for region_name, bbox in BBOX.items():
+    for scope_name, bbox in BBOX.items():
         url = firms_url_for_bbox(bbox, LOOKBACK_HOURS)
         r = requests.get(url, headers=HTTP_HEADERS, timeout=60)
         if r.status_code != 200:
@@ -191,7 +187,7 @@ def main():
                 continue
 
             dt_utc = parse_dt_utc(acq_date, acq_time)
-            if dt_utc is None:   # ✅ FIX: تجاهل الوقت الغلط بدل انهيار السكربت
+            if dt_utc is None:
                 continue
 
             if not within_hours(dt_utc, LOOKBACK_HOURS):
@@ -219,22 +215,19 @@ def main():
             age_min = int((datetime.datetime.now(datetime.timezone.utc) - dt_utc).total_seconds() // 60)
 
             events.append({
-                "region": region_name,
+                "scope": scope_name,
                 "lat": lat,
                 "lon": lon,
                 "frp": frp,
                 "conf": c_bucket,
                 "age_min": age_min
             })
-            per_region_counts[region_name] += 1
+            per_scope_counts[scope_name] += 1
 
     count = len(events)
     delta = count - prev_count
 
-    if count == 0:
-        status = "🟢 حالة الرصد: طبيعي"
-    else:
-        status = "🔴 حالة الرصد: تنبيه"
+    status = "🟢 حالة الرصد: طبيعي" if count == 0 else "🔴 حالة الرصد: تنبيه"
 
     if delta > 0:
         trend = f"↑ يتصاعد (+{delta})"
@@ -247,13 +240,15 @@ def main():
     conf_nom = sum(1 for e in events if e["conf"] == "Nominal")
     conf_low = sum(1 for e in events if e["conf"] == "Low")
 
-    top_region = None
-    top_region_n = 0
-    for rn, n in per_region_counts.items():
-        if n > top_region_n:
-            top_region_n = n
-            top_region = rn
+    # أعلى نطاق (حسب العدد)
+    top_scope = None
+    top_scope_n = 0
+    for sn, n in per_scope_counts.items():
+        if n > top_scope_n:
+            top_scope_n = n
+            top_scope = sn
 
+    # أعلى FRP
     top_frp = None
     for e in events:
         if e["frp"] is None:
@@ -261,10 +256,10 @@ def main():
         if top_frp is None or e["frp"] > top_frp["frp"]:
             top_frp = e
 
+    # Top 3 events (FRP desc then newest)
     def key_event(e):
         frp_val = e["frp"] if e["frp"] is not None else -1.0
         return (-frp_val, e["age_min"])
-
     top3 = sorted(events, key=key_event)[:3]
 
     lines = []
@@ -275,13 +270,13 @@ def main():
     lines.append(f"📊 عدد الحرائق: {count}")
     lines.append(f"📈 اتجاه الحالة: {trend}")
     lines.append("🛰️ المصدر: NASA FIRMS (VIIRS)")
-    lines.append("🧪 فلترة: حرائق طبيعية فقط (استبعاد مصادر صناعية/ثابتة)")
+    lines.append("🧪 فلترة: حرائق طبيعية")
     lines.append("")
 
     if count > 0:
         lines.append("🏆 الأعلى:")
-        if top_region:
-            lines.append(f"• 📍 أعلى نطاق: {top_region} ({top_region_n} نقاط)")
+        if top_scope:
+            lines.append(f"• 📍 أعلى نطاق: {top_scope} ({top_scope_n} نقاط)")
         if top_frp:
             approx_region = summarize_region_name(top_frp["lat"], top_frp["lon"])
             lines.append(f"• 🔥 أعلى شدة (FRP): {top_frp['frp']:.1f} MW — {approx_region}")
@@ -292,11 +287,19 @@ def main():
             frp_txt = f"{e['frp']:.1f}" if e["frp"] is not None else "—"
             lines.append(f"{i}) {e['lat']:.3f}N, {e['lon']:.3f}E — FRP {frp_txt} | {e['conf']} | {e['age_min']}m ago")
         lines.append("")
+        # ✅ روابط استعراض الموقع مباشرة
+        focus = top3[0]
+        lines.append("📍 استعراض الموقع (أبرز نقطة):")
+        lines.append(f"• Google Maps: {maps_link_google(focus['lat'], focus['lon'])}")
+        lines.append(f"• OpenStreetMap: {maps_link_osm(focus['lat'], focus['lon'])}")
+        lines.append("")
 
-    lines.append(f"🔗 عرض الخريطة: {map_link()}")
+    # إذا ما فيه نقاط، نعطي رابط عام للخريطة
+    lines.append(f"🔗 عرض الخريطة: {map_link_general()}")
 
     tg_send("\n".join(lines))
 
+    # حفظ الحالة
     state["last_count"] = count
     state["last_update"] = now_ksa_str()
     save_state(state)
