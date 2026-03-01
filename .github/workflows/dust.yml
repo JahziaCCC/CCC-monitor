@@ -1,15 +1,17 @@
-name: Dust Report
+name: Dust Monitor (KSA)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 */3 * * *"   # كل 3 ساعات
+    # كل 30 دقيقة
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -18,10 +20,22 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run Dust Monitor
+      # ✅ هذا اللي يحفظ/يرجع dust_state.json بين التشغيلات
+      - name: Restore dust state
+        uses: actions/cache@v4
+        with:
+          path: dust_state.json
+          key: dust-state-${{ runner.os }}
+          restore-keys: |
+            dust-state-${{ runner.os }}
+
+      - name: Run dust monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python mon_dust.py
+        run: |
+          python mon_dust.py
