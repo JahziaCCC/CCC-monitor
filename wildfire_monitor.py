@@ -20,7 +20,7 @@ BBOX = {
 }
 
 LOOKBACK_HOURS = 6
-MIN_CONFIDENCE = "nominal"
+MIN_CONFIDENCE = "nominal"   # nominal أو high
 MAX_POINTS_PER_REGION = 300
 
 HTTP_HEADERS = {
@@ -36,23 +36,23 @@ def firms_url_for_bbox(bbox: Tuple[float, float, float, float], hours: int) -> s
     source = "VIIRS_SNPP_NRT"
     return f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_KEY}/{source}/{bbox_str}/{days}"
 
-def now_ksa_str():
+def now_ksa_str() -> str:
     return datetime.datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M KSA")
 
-def load_state():
+def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
         return {}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
-def save_state(s):
+def save_state(s: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(s, f, ensure_ascii=False, indent=2)
 
-def tg_send(text):
+def tg_send(text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
     requests.post(
         url,
@@ -60,7 +60,7 @@ def tg_send(text):
         timeout=30
     ).raise_for_status()
 
-def parse_csv(text):
+def parse_csv(text: str) -> List[dict]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if len(lines) < 2:
         return []
@@ -74,7 +74,7 @@ def parse_csv(text):
     return out
 
 # ===== FIX وقت FIRMS =====
-def parse_dt_utc(date_str, time_str):
+def parse_dt_utc(date_str: str, time_str: str) -> Optional[datetime.datetime]:
     try:
         t = str(time_str).strip().zfill(4)
         hh = int(t[:2])
@@ -82,69 +82,80 @@ def parse_dt_utc(date_str, time_str):
         if hh > 23 or mm > 59:
             return None
         return datetime.datetime.fromisoformat(date_str).replace(
-            hour=hh,
-            minute=mm,
-            tzinfo=datetime.timezone.utc
+            hour=hh, minute=mm, second=0, microsecond=0, tzinfo=datetime.timezone.utc
         )
-    except:
+    except Exception:
         return None
 
-def within_hours(dt_utc, hours):
+def within_hours(dt_utc: datetime.datetime, hours: int) -> bool:
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
     return dt_utc >= cutoff
 
-def conf_bucket(c):
-    c = str(c).lower()
-    if c in ["h", "high"]:
+def conf_bucket(c: str) -> str:
+    c = str(c).strip().lower()
+    if c in ("h", "high"):
         return "High"
-    if c in ["n", "nominal"]:
+    if c in ("n", "nominal"):
         return "Nominal"
-    return "Low"
+    if c in ("l", "low"):
+        return "Low"
+    try:
+        v = float(c)
+        if v >= 80:
+            return "High"
+        if v >= 30:
+            return "Nominal"
+        return "Low"
+    except Exception:
+        return "Nominal"
 
-def pass_conf(min_conf, c):
-    if min_conf == "high":
-        return c == "High"
-    return c in ["High", "Nominal"]
+def pass_conf(min_conf: str, bucketed: str) -> bool:
+    if min_conf.lower().strip() == "high":
+        return bucketed == "High"
+    return bucketed in ("High", "Nominal")
 
-def is_natural_fire(row):
+def is_natural_fire(row: dict) -> bool:
+    """
+    VIIRS 'type':
+      0 = presumed vegetation fire  ✅ نعتبرها حرائق طبيعية
+      1 = active volcano
+      2 = other static land source (غالباً صناعي ثابت / gas flares)
+    """
     t = row.get("type")
-    if not t:
+    if t is None or t == "":
         return True
     try:
         return int(float(t)) == 0
-    except:
+    except Exception:
         return True
 
-def map_link():
+def map_link() -> str:
     return "https://firms.modaps.eosdis.nasa.gov/map/"
 
-def google_map(lat, lon):
+def google_maps(lat: float, lon: float) -> str:
     return f"https://www.google.com/maps?q={lat},{lon}"
 
 def main():
-
     state = load_state()
     prev_count = int(state.get("last_count", 0))
 
-    events = []
-    per_scope = {k: 0 for k in BBOX}
+    events: List[dict] = []
 
     for scope, bbox in BBOX.items():
-
-        r = requests.get(
-            firms_url_for_bbox(bbox, LOOKBACK_HOURS),
-            headers=HTTP_HEADERS,
-            timeout=60
-        )
-
+        url = firms_url_for_bbox(bbox, LOOKBACK_HOURS)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=60)
         if r.status_code != 200:
             continue
 
         rows = parse_csv(r.text)[:MAX_POINTS_PER_REGION]
 
         for row in rows:
+            acq_date = row.get("acq_date")
+            acq_time = row.get("acq_time")
+            if not acq_date or not acq_time:
+                continue
 
-            dt = parse_dt_utc(row.get("acq_date"), row.get("acq_time"))
+            dt = parse_dt_utc(acq_date, acq_time)
             if dt is None:
                 continue
 
@@ -154,23 +165,23 @@ def main():
             if not is_natural_fire(row):
                 continue
 
-            c = conf_bucket(row.get("confidence"))
+            c = conf_bucket(row.get("confidence", ""))
             if not pass_conf(MIN_CONFIDENCE, c):
                 continue
 
             try:
                 lat = float(row["latitude"])
                 lon = float(row["longitude"])
-            except:
+            except Exception:
                 continue
 
             frp = None
             try:
-                frp = float(row.get("frp"))
-            except:
-                pass
+                frp = float(row.get("frp")) if row.get("frp") not in (None, "") else None
+            except Exception:
+                frp = None
 
-            age = int((datetime.datetime.now(datetime.timezone.utc)-dt).total_seconds()/60)
+            age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() // 60)
 
             events.append({
                 "scope": scope,
@@ -180,8 +191,6 @@ def main():
                 "conf": c,
                 "age": age
             })
-
-            per_scope[scope] += 1
 
     count = len(events)
     delta = count - prev_count
@@ -195,7 +204,7 @@ def main():
     else:
         trend = "↔ مستقر (+0)"
 
-    lines = []
+    lines: List[str] = []
     lines.append("🔥 رصد حرائق طبيعية")
     lines.append(f"🕒 {now_ksa_str()}")
     lines.append("")
@@ -207,17 +216,24 @@ def main():
     lines.append("")
 
     if count > 0:
-
-        top3 = sorted(events, key=lambda x: -(x["frp"] or 0))[:3]
+        # Top 3 by FRP desc then newest
+        def key_event(e):
+            frp_val = e["frp"] if e["frp"] is not None else -1.0
+            return (-frp_val, e["age"])
+        top3 = sorted(events, key=key_event)[:3]
 
         lines.append("📌 أبرز النقاط:")
-        for i,e in enumerate(top3,1):
-            frp = f"{e['frp']:.1f}" if e["frp"] else "—"
-            lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp} | {e['conf']} | {e['age']}m")
+        for i, e in enumerate(top3, start=1):
+            frp_txt = f"{e['frp']:.1f}" if e["frp"] is not None else "—"
+            lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp_txt} | {e['conf']} | {e['age']}m")
 
         lines.append("")
-        lines.append("📍 استعراض الموقع:")
-        lines.append(google_map(top3[0]["lat"], top3[0]["lon"]))
+        lines.append("📍 رابط Google Maps (أبرز نقطة):")
+        lines.append(google_maps(top3[0]["lat"], top3[0]["lon"]))
+        lines.append("")
+        lines.append("🗺️ روابط Google Maps (أفضل 3):")
+        for i, e in enumerate(top3, start=1):
+            lines.append(f"{i}) {google_maps(e['lat'], e['lon'])}")
         lines.append("")
 
     lines.append(f"🔗 عرض الخريطة: {map_link()}")
