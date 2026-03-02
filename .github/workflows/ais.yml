@@ -2,8 +2,8 @@ name: AIS Monitor
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"   # كل ساعة
+  #schedule:
+   # - cron: "0 * * * *"   # كل ساعة
 
 jobs:
   run:
