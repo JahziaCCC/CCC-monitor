@@ -167,19 +167,24 @@ def main():
             if not pass_conf(MIN_CONFIDENCE, c):
                 continue
 
-            try:
+                        try:
                 lat = float(row["latitude"])
                 lon = float(row["longitude"])
             except Exception:
                 continue
-                # السعودية فقط
-if not (
-    16.0 <= lat <= 32.6 and
-    34.5 <= lon <= 55.8
-):
-    continue
+
+            # السعودية فقط
+            if not (
+                16.0 <= lat <= 32.6 and
+                34.5 <= lon <= 55.8
+            ):
+                continue
 
             frp = None
+            try:
+                frp = float(row.get("frp")) if row.get("frp") not in (None, "") else None
+            except Exception:
+                frp = None
             try:
                 frp = float(row.get("frp")) if row.get("frp") not in (None, "") else None
             except Exception:
