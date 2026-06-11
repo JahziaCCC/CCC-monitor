@@ -2,7 +2,7 @@ import os
 import json
 import math
 import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Dict, Optional
 import requests
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -17,9 +17,13 @@ BBOX = {
     "السعودية": (34.5, 16.0, 55.8, 32.6),
 }
 
+SOURCES = [
+    "VIIRS_SNPP_NRT",
+    "VIIRS_NOAA20_NRT"
+]
+
 LOOKBACK_HOURS = 6
 MIN_CONFIDENCE = "nominal"
-MAX_POINTS_PER_REGION = 300
 
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -27,200 +31,140 @@ HTTP_HEADERS = {
     "Connection": "close",
 }
 
-def firms_url_for_bbox(bbox: Tuple[float, float, float, float], hours: int) -> str:
-    min_lon, min_lat, max_lon, max_lat = bbox
-    days = max(1, math.ceil(hours / 24))
-    bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
-    source = "VIIRS_SNPP_NRT"
-    return f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_KEY}/{source}/{bbox_str}/{days}"
+# =========================
 
-def now_ksa_str() -> str:
+def now_ksa():
     return datetime.datetime.now(KSA_TZ).strftime("%Y-%m-%d %H:%M KSA")
 
-def load_state() -> dict:
+def load_state():
     if not os.path.exists(STATE_FILE):
-        return {}
+        return {"seen": {}}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
-        return {}
+    except:
+        return {"seen": {}}
 
-def save_state(s: dict) -> None:
+def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(s, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
-def tg_send(text: str) -> None:
+def tg_send(text):
     url = f"https://api.telegram.org/bot{BOT}/sendMessage"
-    requests.post(
-        url,
-        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
-        timeout=30
-    ).raise_for_status()
+    requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True
+    })
 
-def parse_csv(text: str) -> List[dict]:
+def parse_csv(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if len(lines) < 2:
         return []
     header = lines[0].split(",")
     out = []
-    for ln in lines[1:]:
-        cols = ln.split(",")
-        if len(cols) != len(header):
-            continue
-        out.append({header[i]: cols[i] for i in range(len(header))})
+    for line in lines[1:]:
+        cols = line.split(",")
+        if len(cols) == len(header):
+            out.append({header[i]: cols[i] for i in range(len(header))})
     return out
 
-def parse_dt_utc(date_str: str, time_str: str) -> Optional[datetime.datetime]:
-    try:
-        t = str(time_str).strip().zfill(4)
-        hh = int(t[:2])
-        mm = int(t[2:])
-        if hh > 23 or mm > 59:
-            return None
-        return datetime.datetime.fromisoformat(date_str).replace(
-            hour=hh, minute=mm, second=0, microsecond=0,
-            tzinfo=datetime.timezone.utc
-        )
-    except Exception:
-        return None
+def is_saudi(lat, lon):
+    return 16.0 <= lat <= 32.6 and 34.5 <= lon <= 55.8
 
-def within_hours(dt_utc: datetime.datetime, hours: int) -> bool:
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
-    return dt_utc >= cutoff
-
-def conf_bucket(c: str) -> str:
-    c = str(c).lower().strip()
-    if c in ("h", "high"):
-        return "High"
-    if c in ("n", "nominal"):
-        return "Nominal"
-    if c in ("l", "low"):
-        return "Low"
-    try:
-        v = float(c)
-        if v >= 80:
-            return "High"
-        if v >= 30:
-            return "Nominal"
-        return "Low"
-    except Exception:
-        return "Nominal"
-
-def pass_conf(min_conf: str, bucket: str) -> bool:
-    if min_conf == "high":
-        return bucket == "High"
-    return bucket in ("High", "Nominal")
-
-def is_natural_fire(row: dict) -> bool:
-    t = row.get("type")
-    if not t:
-        return True
-    try:
-        return int(float(t)) == 0
-    except Exception:
-        return True
-
-def map_link() -> str:
-    return "https://firms.modaps.eosdis.nasa.gov/map/"
-
-def google_maps(lat: float, lon: float) -> str:
-    return f"https://www.google.com/maps?q={lat},{lon}"
+def make_id(lat, lon, date, time):
+    return f"{round(lat,3)}_{round(lon,3)}_{date}_{time}"
 
 def main():
+
     state = load_state()
-    prev_count = int(state.get("last_count", 0))
+    seen = state.get("seen", {})
 
-    events: List[dict] = []
+    events = []
 
-    for scope, bbox in BBOX.items():
-        url = firms_url_for_bbox(bbox, LOOKBACK_HOURS)
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=60)
-        if r.status_code != 200:
-            continue
+    for _, bbox in BBOX.items():
+        min_lon, min_lat, max_lon, max_lat = bbox
+        days = max(1, math.ceil(LOOKBACK_HOURS / 24))
+        bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
 
-        rows = parse_csv(r.text)[:MAX_POINTS_PER_REGION]
-
-        for row in rows:
-
-            if not is_natural_fire(row):
+        for source in SOURCES:
+            url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{FIRMS_KEY}/{source}/{bbox_str}/{days}"
+            r = requests.get(url, headers=HTTP_HEADERS, timeout=60)
+            if r.status_code != 200:
                 continue
 
-            c = conf_bucket(row.get("confidence", ""))
-            if not pass_conf(MIN_CONFIDENCE, c):
-                continue
+            rows = parse_csv(r.text)
 
-            try:
-                lat = float(row["latitude"])
-                lon = float(row["longitude"])
-            except Exception:
-                continue
+            for row in rows:
 
-            # السعودية فقط
-            if not (16.0 <= lat <= 32.6 and 34.5 <= lon <= 55.8):
-                continue
+                try:
+                    lat = float(row["latitude"])
+                    lon = float(row["longitude"])
+                except:
+                    continue
 
-            dt = parse_dt_utc(row.get("acq_date"), row.get("acq_time"))
-            if not dt or not within_hours(dt, LOOKBACK_HOURS):
-                continue
+                if not is_saudi(lat, lon):
+                    continue
 
-            try:
-                frp = float(row["frp"]) if row.get("frp") else None
-            except Exception:
+                conf = row.get("confidence", "").lower()
+                if conf not in ["nominal", "high", "n", "h", "low", "l"]:
+                    conf = "nominal"
+
+                if not row.get("acq_date") or not row.get("acq_time"):
+                    continue
+
+                uid = make_id(lat, lon, row["acq_date"], row["acq_time"])
+
+                if uid in seen:
+                    continue
+
+                seen[uid] = True
+
                 frp = None
+                try:
+                    frp = float(row["frp"]) if row.get("frp") else None
+                except:
+                    frp = None
 
-            age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() // 60)
+                events.append({
+                    "lat": lat,
+                    "lon": lon,
+                    "frp": frp,
+                    "conf": conf,
+                    "date": row["acq_date"],
+                    "time": row["acq_time"]
+                })
 
-            events.append({
-                "lat": lat,
-                "lon": lon,
-                "frp": frp,
-                "conf": c,
-                "age": age
-            })
+    state["seen"] = seen
+    save_state(state)
 
-    count = len(events)
-    delta = count - prev_count
+    if not events:
+        return
 
-    status = "🟢 طبيعي" if count == 0 else "🔴 تنبيه"
+    events.sort(key=lambda x: (x["frp"] or 0), reverse=True)
+    top = events[:3]
 
-    trend = "↔ مستقر"
-    if delta > 0:
-        trend = f"↑ يتصاعد (+{delta})"
-    elif delta < 0:
-        trend = f"↓ يتحسن ({delta})"
+    lines = []
+    lines.append("🔥 رصد حرائق السعودية V2")
+    lines.append(f"🕒 {now_ksa()}")
+    lines.append("")
+    lines.append(f"🚨 حرائق جديدة: {len(events)}")
+    lines.append("")
+    lines.append("📌 أبرز النقاط:")
 
-    lines = [
-        "🔥 رصد حرائق السعودية",
-        f"🕒 {now_ksa_str()}",
-        "",
-        status,
-        f"📊 العدد: {count}",
-        f"📈 الاتجاه: {trend}",
-        "",
-    ]
-
-    if events:
-        top3 = sorted(events, key=lambda x: (x["frp"] or 0) * -1)[:3]
-
-        lines.append("📌 أبرز النقاط:")
-        for i, e in enumerate(top3, 1):
-            frp = f"{e['frp']:.1f}" if e["frp"] else "—"
-            lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp} | {e['conf']} | {e['age']}m")
-
-        lines.append("")
-        lines.append("📍 الخريطة:")
-        lines.append(google_maps(top3[0]["lat"], top3[0]["lon"]))
+    for i, e in enumerate(top, 1):
+        frp = f"{e['frp']:.1f}" if e["frp"] else "—"
+        lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp} | {e['conf']}")
 
     lines.append("")
-    lines.append("🗺️ FIRMS Map:")
-    lines.append(map_link())
+    lines.append(f"📍 https://www.google.com/maps?q={top[0]['lat']},{top[0]['lon']}")
+    lines.append("🗺️ https://firms.modaps.eosdis.nasa.gov/map/")
 
     tg_send("\n".join(lines))
 
-    state["last_count"] = count
-    state["last_update"] = now_ksa_str()
+    state["last_run"] = now_ksa()
     save_state(state)
+
 
 if __name__ == "__main__":
     main()
