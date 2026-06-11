@@ -15,8 +15,6 @@ STATE_FILE = "wildfire_state.json"
 # ========= مناطق الرصد =========
 BBOX = {
     "السعودية": (34.5, 16.0, 55.8, 32.6),
-    "البحر الأحمر": (32.0, 12.0, 44.5, 30.5),
-    "الخليج العربي": (47.0, 22.0, 56.8, 30.8),
 }
 
 LOOKBACK_HOURS = 6
@@ -174,6 +172,12 @@ def main():
                 lon = float(row["longitude"])
             except Exception:
                 continue
+                # السعودية فقط
+if not (
+    16.0 <= lat <= 32.6 and
+    34.5 <= lon <= 55.8
+):
+    continue
 
             frp = None
             try:
