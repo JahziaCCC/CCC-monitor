@@ -2,7 +2,6 @@ import os
 import json
 import datetime
 import requests
-from typing import List, Dict, Tuple
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -11,8 +10,8 @@ FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "wildfire_state.json"
 
-# ========= نطاق السعودية =========
-BBOX = (34.5, 16.0, 55.8, 32.6)
+# ========= نطاق أضيق للسعودية =========
+BBOX = (34.5, 16.0, 55.0, 32.0)
 
 SOURCES = [
     "VIIRS_SNPP_NRT",
@@ -44,11 +43,14 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def tg_send(text):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
-        timeout=30
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+            timeout=30
+        )
+    except:
+        pass
 
 def parse_csv(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -63,23 +65,27 @@ def parse_csv(text):
     return out
 
 # =========================================================
-# 🔥 FLITER FINAL (FIXED)
+# 🔥 HARD SAUDI FILTER (FINAL VERSION)
 # =========================================================
 
 def is_saudi(lat, lon):
 
-    # حدود السعودية الأساسية
-    if lat < 16.0 or lat > 32.0:
+    # داخل السعودية فقط (نطاق مشدد)
+    if not (16.0 <= lat <= 32.0):
         return False
-    if lon < 34.5 or lon > 55.0:
-        return False
-
-    # ❌ استبعاد الخليج (إمارات + قطر + بحرین)
-    if lat < 26.5 and lon > 50.5:
+    if not (34.5 <= lon <= 55.0):
         return False
 
-    # ❌ استبعاد عمان الشرقية
-    if lat < 22.5 and lon > 56.0:
+    # ❌ الخليج بالكامل (الإمارات + قطر + البحرين)
+    if lat < 27.0 and lon > 50.0:
+        return False
+
+    # ❌ شرق عمان
+    if lat < 23.0 and lon > 56.0:
+        return False
+
+    # ❌ ضوضاء بحرية / صناعية جنوب البحر الأحمر
+    if lat < 18.0 and lon < 39.0:
         return False
 
     return True
@@ -121,7 +127,7 @@ def main():
             except:
                 continue
 
-            # 🔥 فلتر السعودية الحقيقي
+            # 🔥 فلتر السعودية الحقيقي (آخر نسخة)
             if not is_saudi(lat, lon):
                 continue
 
@@ -160,7 +166,7 @@ def main():
     top = events[:3]
 
     msg = []
-    msg.append("🔥 رصد حرائق السعودية V4 FIXED")
+    msg.append("🔥 رصد حرائق السعودية V4 FINAL")
     msg.append(f"🕒 {now_ksa()}")
     msg.append("")
     msg.append(f"🚨 حرائق جديدة: {len(events)}")
