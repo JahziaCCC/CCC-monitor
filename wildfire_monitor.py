@@ -2,7 +2,7 @@ import os
 import json
 import math
 import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import List, Tuple, Optional
 import requests
 
 BOT = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -12,13 +12,13 @@ FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "wildfire_state.json"
 
-# ========= مناطق الرصد =========
+# ========= السعودية فقط =========
 BBOX = {
     "السعودية": (34.5, 16.0, 55.8, 32.6),
 }
 
 LOOKBACK_HOURS = 6
-MIN_CONFIDENCE = "nominal"   # nominal أو high
+MIN_CONFIDENCE = "nominal"
 MAX_POINTS_PER_REGION = 300
 
 HTTP_HEADERS = {
@@ -71,7 +71,6 @@ def parse_csv(text: str) -> List[dict]:
         out.append({header[i]: cols[i] for i in range(len(header))})
     return out
 
-# ===== FIX وقت FIRMS =====
 def parse_dt_utc(date_str: str, time_str: str) -> Optional[datetime.datetime]:
     try:
         t = str(time_str).strip().zfill(4)
@@ -80,7 +79,8 @@ def parse_dt_utc(date_str: str, time_str: str) -> Optional[datetime.datetime]:
         if hh > 23 or mm > 59:
             return None
         return datetime.datetime.fromisoformat(date_str).replace(
-            hour=hh, minute=mm, second=0, microsecond=0, tzinfo=datetime.timezone.utc
+            hour=hh, minute=mm, second=0, microsecond=0,
+            tzinfo=datetime.timezone.utc
         )
     except Exception:
         return None
@@ -90,7 +90,7 @@ def within_hours(dt_utc: datetime.datetime, hours: int) -> bool:
     return dt_utc >= cutoff
 
 def conf_bucket(c: str) -> str:
-    c = str(c).strip().lower()
+    c = str(c).lower().strip()
     if c in ("h", "high"):
         return "High"
     if c in ("n", "nominal"):
@@ -107,20 +107,14 @@ def conf_bucket(c: str) -> str:
     except Exception:
         return "Nominal"
 
-def pass_conf(min_conf: str, bucketed: str) -> bool:
-    if min_conf.lower().strip() == "high":
-        return bucketed == "High"
-    return bucketed in ("High", "Nominal")
+def pass_conf(min_conf: str, bucket: str) -> bool:
+    if min_conf == "high":
+        return bucket == "High"
+    return bucket in ("High", "Nominal")
 
 def is_natural_fire(row: dict) -> bool:
-    """
-    VIIRS 'type':
-      0 = presumed vegetation fire  ✅ نعتبرها حرائق طبيعية
-      1 = active volcano
-      2 = other static land source (غالباً صناعي ثابت / gas flares)
-    """
     t = row.get("type")
-    if t is None or t == "":
+    if not t:
         return True
     try:
         return int(float(t)) == 0
@@ -148,17 +142,6 @@ def main():
         rows = parse_csv(r.text)[:MAX_POINTS_PER_REGION]
 
         for row in rows:
-            acq_date = row.get("acq_date")
-            acq_time = row.get("acq_time")
-            if not acq_date or not acq_time:
-                continue
-
-            dt = parse_dt_utc(acq_date, acq_time)
-            if dt is None:
-                continue
-
-            if not within_hours(dt, LOOKBACK_HOURS):
-                continue
 
             if not is_natural_fire(row):
                 continue
@@ -167,33 +150,28 @@ def main():
             if not pass_conf(MIN_CONFIDENCE, c):
                 continue
 
-                        try:
+            try:
                 lat = float(row["latitude"])
                 lon = float(row["longitude"])
             except Exception:
                 continue
 
             # السعودية فقط
-            if not (
-                16.0 <= lat <= 32.6 and
-                34.5 <= lon <= 55.8
-            ):
+            if not (16.0 <= lat <= 32.6 and 34.5 <= lon <= 55.8):
                 continue
 
-            frp = None
+            dt = parse_dt_utc(row.get("acq_date"), row.get("acq_time"))
+            if not dt or not within_hours(dt, LOOKBACK_HOURS):
+                continue
+
             try:
-                frp = float(row.get("frp")) if row.get("frp") not in (None, "") else None
-            except Exception:
-                frp = None
-            try:
-                frp = float(row.get("frp")) if row.get("frp") not in (None, "") else None
+                frp = float(row["frp"]) if row.get("frp") else None
             except Exception:
                 frp = None
 
             age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() // 60)
 
             events.append({
-                "scope": scope,
                 "lat": lat,
                 "lon": lon,
                 "frp": frp,
@@ -204,48 +182,39 @@ def main():
     count = len(events)
     delta = count - prev_count
 
-    status = "🟢 حالة الرصد: طبيعي" if count == 0 else "🔴 حالة الرصد: تنبيه"
+    status = "🟢 طبيعي" if count == 0 else "🔴 تنبيه"
 
+    trend = "↔ مستقر"
     if delta > 0:
         trend = f"↑ يتصاعد (+{delta})"
     elif delta < 0:
         trend = f"↓ يتحسن ({delta})"
-    else:
-        trend = "↔ مستقر (+0)"
 
-    lines: List[str] = []
-    lines.append("🔥 رصد حرائق طبيعية")
-    lines.append(f"🕒 {now_ksa_str()}")
-    lines.append("")
-    lines.append(status)
-    lines.append(f"📊 عدد الحرائق: {count}")
-    lines.append(f"📈 اتجاه الحالة: {trend}")
-    lines.append("🛰️ المصدر: NASA FIRMS (VIIRS)")
-    lines.append("🧪 فلترة: حرائق طبيعية")
-    lines.append("")
+    lines = [
+        "🔥 رصد حرائق السعودية",
+        f"🕒 {now_ksa_str()}",
+        "",
+        status,
+        f"📊 العدد: {count}",
+        f"📈 الاتجاه: {trend}",
+        "",
+    ]
 
-    if count > 0:
-        # Top 3 by FRP desc then newest
-        def key_event(e):
-            frp_val = e["frp"] if e["frp"] is not None else -1.0
-            return (-frp_val, e["age"])
-        top3 = sorted(events, key=key_event)[:3]
+    if events:
+        top3 = sorted(events, key=lambda x: (x["frp"] or 0) * -1)[:3]
 
         lines.append("📌 أبرز النقاط:")
-        for i, e in enumerate(top3, start=1):
-            frp_txt = f"{e['frp']:.1f}" if e["frp"] is not None else "—"
-            lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp_txt} | {e['conf']} | {e['age']}m")
+        for i, e in enumerate(top3, 1):
+            frp = f"{e['frp']:.1f}" if e["frp"] else "—"
+            lines.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp} | {e['conf']} | {e['age']}m")
 
         lines.append("")
-        lines.append("📍 رابط Google Maps (أبرز نقطة):")
+        lines.append("📍 الخريطة:")
         lines.append(google_maps(top3[0]["lat"], top3[0]["lon"]))
-        lines.append("")
-        lines.append("🗺️ روابط Google Maps (أفضل 3):")
-        for i, e in enumerate(top3, start=1):
-            lines.append(f"{i}) {google_maps(e['lat'], e['lon'])}")
-        lines.append("")
 
-    lines.append(f"🔗 عرض الخريطة: {map_link()}")
+    lines.append("")
+    lines.append("🗺️ FIRMS Map:")
+    lines.append(map_link())
 
     tg_send("\n".join(lines))
 
