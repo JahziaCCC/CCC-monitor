@@ -10,8 +10,8 @@ FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "wildfire_state.json"
 
-# ========= نطاق أضيق للسعودية =========
-BBOX = (34.5, 16.0, 55.0, 32.0)
+# ========= نطاق السعودية (متوازن) =========
+BBOX = (34.5, 16.0, 55.2, 32.2)
 
 SOURCES = [
     "VIIRS_SNPP_NRT",
@@ -43,14 +43,11 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def tg_send(text):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
-            timeout=30
-        )
-    except:
-        pass
+    requests.post(
+        f"https://api.telegram.org/bot{BOT}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True},
+        timeout=30
+    )
 
 def parse_csv(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -65,27 +62,22 @@ def parse_csv(text):
     return out
 
 # =========================================================
-# 🔥 HARD SAUDI FILTER (FINAL VERSION)
+# 🔥 FLTER BALANCED (مهم: يمنع الخليج بدون تشدد زائد)
 # =========================================================
 
 def is_saudi(lat, lon):
 
-    # داخل السعودية فقط (نطاق مشدد)
-    if not (16.0 <= lat <= 32.0):
+    if not (16.0 <= lat <= 32.2):
         return False
-    if not (34.5 <= lon <= 55.0):
+    if not (34.5 <= lon <= 55.2):
         return False
 
-    # ❌ الخليج بالكامل (الإمارات + قطر + البحرين)
-    if lat < 27.0 and lon > 50.0:
+    # ❌ الخليج
+    if lat < 27.0 and lon > 50.5:
         return False
 
     # ❌ شرق عمان
     if lat < 23.0 and lon > 56.0:
-        return False
-
-    # ❌ ضوضاء بحرية / صناعية جنوب البحر الأحمر
-    if lat < 18.0 and lon < 39.0:
         return False
 
     return True
@@ -127,7 +119,6 @@ def main():
             except:
                 continue
 
-            # 🔥 فلتر السعودية الحقيقي (آخر نسخة)
             if not is_saudi(lat, lon):
                 continue
 
@@ -145,9 +136,13 @@ def main():
             seen[uid] = True
 
             try:
-                frp = float(row["frp"]) if row.get("frp") else None
+                frp = float(row["frp"]) if row.get("frp") else 0
             except:
-                frp = None
+                frp = 0
+
+            # 🔥 فلتر خفيف مهم
+            if frp < 5:
+                continue
 
             events.append({
                 "lat": lat,
@@ -159,32 +154,40 @@ def main():
     state["seen"] = seen
     save_state(state)
 
+    # =========================
+    # 📢 رسائل عربية واضحة
+    # =========================
+
     if not events:
+        tg_send(f"""🟢 لا توجد حرائق حالياً داخل السعودية
+
+🕒 {now_ksa()}
+🛰️ النظام يعمل بشكل طبيعي""")
         return
 
-    events.sort(key=lambda x: (x["frp"] or 0), reverse=True)
+    events.sort(key=lambda x: x["frp"], reverse=True)
     top = events[:3]
 
     msg = []
-    msg.append("🔥 رصد حرائق السعودية V4 FINAL")
+    msg.append("🔥 رصد حرائق السعودية - V4 Balanced")
     msg.append(f"🕒 {now_ksa()}")
     msg.append("")
-    msg.append(f"🚨 حرائق جديدة: {len(events)}")
+    msg.append(f"🚨 تم رصد {len(events)} حريق / نقطة حرارية")
     msg.append("")
-    msg.append("📌 أبرز النقاط:")
+    msg.append("📌 أبرز المواقع:")
 
     for i, e in enumerate(top, 1):
-        frp = f"{e['frp']:.1f}" if e["frp"] else "—"
-        msg.append(f"{i}) {e['lat']:.3f},{e['lon']:.3f} | FRP {frp} | {e['conf']}")
+        msg.append(
+            f"{i}) الموقع: {e['lat']:.3f}, {e['lon']:.3f}\n"
+            f"   🔥 قوة الحريق (FRP): {e['frp']:.1f}\n"
+            f"   📊 الحالة: {e['conf']}"
+        )
 
     msg.append("")
-    msg.append(f"📍 https://www.google.com/maps?q={top[0]['lat']},{top[0]['lon']}")
-    msg.append("🗺️ https://firms.modaps.eosdis.nasa.gov/map/")
+    msg.append(f"📍 الخريطة: https://www.google.com/maps?q={top[0]['lat']},{top[0]['lon']}")
+    msg.append("🗺️ FIRMS: https://firms.modaps.eosdis.nasa.gov/map/")
 
     tg_send("\n".join(msg))
-
-    state["last_run"] = now_ksa()
-    save_state(state)
 
 
 if __name__ == "__main__":
