@@ -12,15 +12,14 @@ FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 STATE_FILE = "wildfire_state.json"
 
-# ========= السعودية فقط =========
-BBOX = (34.5, 16.0, 55.8, 32.6)
+# ========= نطاق أدق للسعودية =========
+BBOX = (34.8, 16.5, 55.3, 31.8)
 
 SOURCES = [
     "VIIRS_SNPP_NRT",
     "VIIRS_NOAA20_NRT"
 ]
 
-LOOKBACK_HOURS = 6
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "text/csv,*/*",
@@ -51,7 +50,7 @@ def tg_send(text):
         "chat_id": CHAT_ID,
         "text": text,
         "disable_web_page_preview": True
-    }, timeout=30)
+    })
 
 def parse_csv(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -65,9 +64,9 @@ def parse_csv(text):
             out.append({header[i]: cols[i] for i in range(len(header))})
     return out
 
-# ========= فلتر السعودية الصارم =========
+# ========= فلترة صارمة جدًا =========
 def is_saudi(lat, lon):
-    return 16.0 <= lat <= 32.6 and 34.5 <= lon <= 55.8
+    return 16.5 <= lat <= 32.0 and 34.8 <= lon <= 55.3
 
 def make_id(lat, lon, date, time):
     return f"{round(lat,2)}_{round(lon,2)}_{date}_{time}"
@@ -100,8 +99,12 @@ def main():
             except:
                 continue
 
-            # 🔥 فلتر السعودية الصارم (أول شيء)
+            # 🔥 فلتر السعودية أولاً (صارم)
             if not is_saudi(lat, lon):
+                continue
+
+            # 🚫 استبعاد الخليج العربي بشكل إضافي
+            if lon > 54.0 and lat < 27:
                 continue
 
             date = row.get("acq_date")
@@ -139,12 +142,11 @@ def main():
     if not events:
         return
 
-    # ترتيب حسب القوة
     events.sort(key=lambda x: (x["frp"] or 0), reverse=True)
     top = events[:3]
 
     lines = []
-    lines.append("🔥 رصد حرائق السعودية V3")
+    lines.append("🔥 رصد حرائق السعودية V3 FIXED")
     lines.append(f"🕒 {now_ksa()}")
     lines.append("")
     lines.append(f"🚨 حرائق جديدة: {len(events)}")
