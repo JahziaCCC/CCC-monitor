@@ -1,13 +1,15 @@
 import os
 import json
 import math
+import csv
+import io
 import datetime
 import time
 import requests
 
 # ============================================================
-# 🔥 Saudi Wildfire Intelligence V5.0
-# Intelligent Fire Intelligence Engine
+# 🔥 Saudi Wildfire Intelligence V5.1 AI
+# Intelligent Wildfire Detection & Risk Engine
 # NASA FIRMS + VIIRS
 # ============================================================
 
@@ -16,14 +18,14 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 FIRMS_KEY = os.environ["FIRMS_API_KEY"]
 
 KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
+UTC = datetime.timezone.utc
 
-STATE_FILE = "wildfire_state_v5.json"
+STATE_FILE = "wildfire_state_v51.json"
 
 # ============================================================
-# إعدادات الرصد
+# 🇸🇦 نطاق الرصد
 # ============================================================
 
-# Bounding Box واسع للسعودية فقط كمرحلة V5.0
 BBOX = (
     34.5,   # min longitude
     16.0,   # min latitude
@@ -31,46 +33,104 @@ BBOX = (
     32.6    # max latitude
 )
 
-# الأقمار المستخدمة
+# ============================================================
+# 🛰️ الأقمار الصناعية
+# ============================================================
+
 SOURCES = [
     "VIIRS_SNPP_NRT",
     "VIIRS_NOAA20_NRT",
 ]
 
-# FRP الأدنى
+# ============================================================
+# ⚙️ إعدادات الذكاء والتحليل
+# ============================================================
+
 MIN_FRP = 3.0
 
-# أقصى عمر للبيانات
 MAX_AGE_HOURS = 24
 
-# مسافة التجميع بالكيلومتر
 CLUSTER_RADIUS_KM = 2.5
 
-# الفترة الزمنية للتجميع
 CLUSTER_TIME_MINUTES = 180
 
-# أقل عدد نقاط لرفع الثقة
-MULTI_POINT_CLUSTER = 2
+# الحد الأدنى لاعتبار البؤرة تنبيهًا
+MIN_ALERT_SCORE = 45
 
-# عدد المواقع المعروضة
+# إذا كانت نقطة واحدة وقوتها ضعيفة لا نرسل تنبيه
+SINGLE_POINT_MIN_SCORE = 60
+
+# عدد البؤر التي تظهر في التقرير
 TOP_CLUSTERS = 5
 
+# إرسال الحالة المستقرة؟
+SEND_NORMAL_STATUS = True
+
 # ============================================================
-# Headers
+# 🌐 الاتصال
 # ============================================================
 
 HTTP_HEADERS = {
-    "User-Agent": "Saudi-Wildfire-Intelligence-V5/1.0",
+    "User-Agent": "Saudi-Wildfire-Intelligence-V5.1-AI/1.0",
     "Accept": "text/csv,*/*",
     "Connection": "close",
 }
 
 # ============================================================
-# الوقت
+# 🇸🇦 Polygon مبسط للسعودية
+#
+# الهدف:
+# منع معظم النقاط الواقعة خارج المملكة التي تدخل بسبب BBOX.
+#
+# تم تصميمه ليكون محافظًا ولا يستبعد الأطراف السعودية بسهولة.
+# ============================================================
+
+SAUDI_POLYGON = [
+    (32.15, 34.60),
+    (31.40, 36.00),
+    (31.00, 37.00),
+    (30.00, 39.00),
+    (29.00, 41.00),
+    (28.00, 43.00),
+    (27.50, 45.00),
+    (27.80, 48.00),
+    (28.00, 50.00),
+    (27.70, 51.50),
+    (26.50, 52.50),
+    (25.50, 54.00),
+    (24.50, 55.20),
+    (23.00, 55.80),
+    (22.00, 55.20),
+    (21.00, 55.00),
+    (20.00, 53.50),
+    (19.00, 51.00),
+    (18.00, 49.00),
+    (17.00, 47.00),
+    (16.00, 44.00),
+    (16.00, 42.00),
+    (17.00, 40.00),
+    (18.00, 39.00),
+    (19.00, 38.50),
+    (20.00, 38.00),
+    (21.00, 37.50),
+    (22.00, 36.50),
+    (23.00, 35.50),
+    (24.00, 35.00),
+    (25.00, 35.00),
+    (26.00, 35.20),
+    (27.00, 35.40),
+    (28.00, 35.50),
+    (29.00, 35.80),
+    (30.00, 36.00),
+    (31.00, 35.50),
+]
+
+# ============================================================
+# 🕒 الوقت
 # ============================================================
 
 def now_utc():
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(UTC)
 
 
 def now_ksa():
@@ -80,7 +140,7 @@ def now_ksa():
 
 
 # ============================================================
-# State
+# 📁 State
 # ============================================================
 
 def load_state():
@@ -88,45 +148,54 @@ def load_state():
     if not os.path.exists(STATE_FILE):
         return {
             "seen": {},
-            "last_clusters": {},
+            "clusters": {},
             "last_run": None
         }
 
     try:
+
         with open(
             STATE_FILE,
             "r",
             encoding="utf-8"
         ) as f:
+
             return json.load(f)
 
     except Exception:
+
         return {
             "seen": {},
-            "last_clusters": {},
+            "clusters": {},
             "last_run": None
         }
 
 
 def save_state(state):
 
-    # تنظيف السجل القديم
     cutoff = now_utc() - datetime.timedelta(hours=48)
 
-    cleaned = {}
+    cleaned_seen = {}
 
-    for key, value in state.get("seen", {}).items():
+    for key, value in state.get(
+        "seen",
+        {}
+    ).items():
 
         try:
-            dt = datetime.datetime.fromisoformat(value)
+
+            dt = datetime.datetime.fromisoformat(
+                value
+            )
 
             if dt >= cutoff:
-                cleaned[key] = value
+                cleaned_seen[key] = value
 
         except Exception:
             pass
 
-    state["seen"] = cleaned
+    state["seen"] = cleaned_seen
+
     state["last_run"] = now_ksa()
 
     with open(
@@ -144,7 +213,7 @@ def save_state(state):
 
 
 # ============================================================
-# Telegram
+# 📲 Telegram
 # ============================================================
 
 def tg_send(text):
@@ -170,43 +239,30 @@ def tg_send(text):
 
 
 # ============================================================
-# CSV Parser
+# 📄 CSV Parser
 # ============================================================
 
 def parse_csv(text):
 
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
+    try:
 
-    if len(lines) < 2:
-        return []
-
-    header = lines[0].split(",")
-
-    rows = []
-
-    for line in lines[1:]:
-
-        columns = line.split(",")
-
-        if len(columns) != len(header):
-            continue
-
-        rows.append(
-            {
-                header[i]: columns[i]
-                for i in range(len(header))
-            }
+        reader = csv.DictReader(
+            io.StringIO(text)
         )
 
-    return rows
+        return [
+            dict(row)
+            for row in reader
+            if row
+        ]
+
+    except Exception:
+
+        return []
 
 
 # ============================================================
-# FIRMS API
+# 🛰️ FIRMS API
 # ============================================================
 
 def get_firms_rows(source):
@@ -221,7 +277,7 @@ def get_firms_rows(source):
     )
 
     url = (
-        f"https://firms.modaps.eosdis.nasa.gov/"
+        "https://firms.modaps.eosdis.nasa.gov/"
         f"api/area/csv/"
         f"{FIRMS_KEY}/"
         f"{source}/"
@@ -230,9 +286,13 @@ def get_firms_rows(source):
 
     last_error = None
 
-    for attempt in range(3):
+    for attempt in range(1, 4):
 
         try:
+
+            print(
+                f"   محاولة الاتصال {attempt}/3..."
+            )
 
             response = requests.get(
                 url,
@@ -242,9 +302,11 @@ def get_firms_rows(source):
 
             if response.status_code == 200:
 
-                return parse_csv(
+                rows = parse_csv(
                     response.text
                 )
+
+                return rows
 
             last_error = (
                 f"HTTP {response.status_code}"
@@ -254,7 +316,8 @@ def get_firms_rows(source):
 
             last_error = str(e)
 
-        time.sleep(3)
+        if attempt < 3:
+            time.sleep(4)
 
     print(
         f"❌ FIRMS API error ({source}): "
@@ -265,28 +328,81 @@ def get_firms_rows(source):
 
 
 # ============================================================
-# السعودية - V5.0
-#
-# ملاحظة:
-# هذه مرحلة أولى تستخدم Bounding Box.
-# لا نستخدم استثناءات مثل:
-# lat < 27 and lon > 50
-# لأنها قد تستبعد مواقع سعودية صحيحة.
+# 🇸🇦 Point in Polygon
 # ============================================================
 
-def is_saudi_bbox(lat, lon):
+def point_in_polygon(lat, lon):
+
+    inside = False
+
+    polygon = SAUDI_POLYGON
+
+    j = len(polygon) - 1
+
+    for i in range(len(polygon)):
+
+        lat_i, lon_i = polygon[i]
+        lat_j, lon_j = polygon[j]
+
+        intersects = (
+            (
+                lon_i > lon
+            ) != (
+                lon_j > lon
+            )
+        ) and (
+            lat
+            <
+            (
+                lat_j - lat_i
+            )
+            *
+            (
+                lon - lon_i
+            )
+            /
+            (
+                lon_j - lon_i
+                if lon_j != lon_i
+                else 1e-12
+            )
+            +
+            lat_i
+        )
+
+        if intersects:
+            inside = not inside
+
+        j = i
+
+    return inside
+
+
+# ============================================================
+# 🇸🇦 فلترة السعودية
+# ============================================================
+
+def is_saudi(lat, lon):
 
     min_lon, min_lat, max_lon, max_lat = BBOX
 
-    return (
+    # أول فلترة سريعة
+    if not (
         min_lat <= lat <= max_lat
         and
         min_lon <= lon <= max_lon
+    ):
+        return False
+
+    # الفلترة الجغرافية
+    return point_in_polygon(
+        lat,
+        lon
     )
 
 
 # ============================================================
-# التاريخ والوقت
+# 🕒 قراءة وقت FIRMS
 # ============================================================
 
 def parse_acquisition_datetime(
@@ -317,14 +433,18 @@ def parse_acquisition_datetime(
         if hour > 23 or minute > 59:
             return None
 
+        year, month, day = map(
+            int,
+            date_value.split("-")
+        )
+
         return datetime.datetime(
-            *map(
-                int,
-                date_value.split("-")
-            ),
+            year,
+            month,
+            day,
             hour,
             minute,
-            tzinfo=datetime.timezone.utc
+            tzinfo=UTC
         )
 
     except Exception:
@@ -333,7 +453,7 @@ def parse_acquisition_datetime(
 
 
 # ============================================================
-# Confidence
+# 🎯 Confidence
 # ============================================================
 
 def confidence_score(value):
@@ -342,13 +462,22 @@ def confidence_score(value):
         value or ""
     ).strip().lower()
 
-    if value in ("h", "high"):
+    if value in (
+        "h",
+        "high"
+    ):
         return 90
 
-    if value in ("n", "nominal"):
+    if value in (
+        "n",
+        "nominal"
+    ):
         return 65
 
-    if value in ("l", "low"):
+    if value in (
+        "l",
+        "low"
+    ):
         return 35
 
     try:
@@ -380,7 +509,40 @@ def confidence_ar(score):
 
 
 # ============================================================
-# Haversine
+# 🔥 نوع النقطة
+# ============================================================
+
+def is_natural_fire(row):
+
+    value = row.get(
+        "type"
+    )
+
+    if value in (
+        None,
+        ""
+    ):
+        return True
+
+    try:
+
+        fire_type = int(
+            float(value)
+        )
+
+        # 0 = vegetation fire
+        # 1 = volcano
+        # 2 = static land source
+        # 3 = offshore
+        return fire_type == 0
+
+    except Exception:
+
+        return True
+
+
+# ============================================================
+# 📐 Haversine
 # ============================================================
 
 def distance_km(
@@ -392,10 +554,17 @@ def distance_km(
 
     earth_radius = 6371.0
 
-    lat1 = math.radians(lat1)
-    lat2 = math.radians(lat2)
+    rlat1 = math.radians(
+        lat1
+    )
 
-    dlat = lat2 - lat1
+    rlat2 = math.radians(
+        lat2
+    )
+
+    dlat = (
+        rlat2 - rlat1
+    )
 
     dlon = math.radians(
         lon2 - lon1
@@ -404,9 +573,9 @@ def distance_km(
     a = (
         math.sin(dlat / 2) ** 2
         +
-        math.cos(lat1)
+        math.cos(rlat1)
         *
-        math.cos(lat2)
+        math.cos(rlat2)
         *
         math.sin(dlon / 2) ** 2
     )
@@ -418,38 +587,15 @@ def distance_km(
         *
         math.atan2(
             math.sqrt(a),
-            math.sqrt(1 - a)
+            math.sqrt(
+                1 - a
+            )
         )
     )
 
 
 # ============================================================
-# Natural Fire Filter
-# ============================================================
-
-def is_natural_fire(row):
-
-    value = row.get("type")
-
-    if value in (None, ""):
-        return True
-
-    try:
-
-        fire_type = int(
-            float(value)
-        )
-
-        # 0 = presumed vegetation fire
-        return fire_type == 0
-
-    except Exception:
-
-        return True
-
-
-# ============================================================
-# تنظيف البيانات
+# 🧹 Normalize
 # ============================================================
 
 def normalize_rows(rows):
@@ -474,13 +620,15 @@ def normalize_rows(rows):
 
             continue
 
-        if not is_saudi_bbox(
+        if not is_saudi(
             lat,
             lon
         ):
             continue
 
-        if not is_natural_fire(row):
+        if not is_natural_fire(
+            row
+        ):
             continue
 
         acquisition = (
@@ -506,7 +654,10 @@ def normalize_rows(rows):
         try:
 
             frp = float(
-                row.get("frp", 0)
+                row.get(
+                    "frp",
+                    0
+                )
             )
 
         except Exception:
@@ -517,7 +668,9 @@ def normalize_rows(rows):
             continue
 
         confidence = confidence_score(
-            row.get("confidence")
+            row.get(
+                "confidence"
+            )
         )
 
         events.append(
@@ -526,10 +679,18 @@ def normalize_rows(rows):
                 "lon": lon,
                 "frp": frp,
                 "confidence": confidence,
-                "date": row.get("acq_date"),
-                "time": row.get("acq_time"),
+                "date": row.get(
+                    "acq_date"
+                ),
+                "time": row.get(
+                    "acq_time"
+                ),
                 "datetime": acquisition,
-                "age_hours": age_hours
+                "age_hours": age_hours,
+                "source": row.get(
+                    "satellite",
+                    ""
+                )
             }
         )
 
@@ -537,7 +698,7 @@ def normalize_rows(rows):
 
 
 # ============================================================
-# إزالة التكرار
+# 🔁 إزالة التكرار
 # ============================================================
 
 def remove_duplicates(events):
@@ -547,8 +708,14 @@ def remove_duplicates(events):
     for event in events:
 
         key = (
-            round(event["lat"], 3),
-            round(event["lon"], 3),
+            round(
+                event["lat"],
+                3
+            ),
+            round(
+                event["lon"],
+                3
+            ),
             event["date"],
             event["time"]
         )
@@ -559,8 +726,11 @@ def remove_duplicates(events):
 
         else:
 
-            # نحتفظ بالأعلى FRP
-            if event["frp"] > unique[key]["frp"]:
+            if (
+                event["frp"]
+                >
+                unique[key]["frp"]
+            ):
 
                 unique[key] = event
 
@@ -570,17 +740,19 @@ def remove_duplicates(events):
 
 
 # ============================================================
-# Clustering
+# 🔥 Clustering
 # ============================================================
 
 def cluster_events(events):
 
     clusters = []
 
-    # ترتيب من الأقوى للأضعف
     events = sorted(
         events,
-        key=lambda x: x["frp"],
+        key=lambda x: (
+            x["frp"],
+            x["confidence"]
+        ),
         reverse=True
     )
 
@@ -590,7 +762,9 @@ def cluster_events(events):
 
         for cluster in clusters:
 
-            center = cluster["center"]
+            center = cluster[
+                "center"
+            ]
 
             distance = distance_km(
                 event["lat"],
@@ -615,40 +789,55 @@ def cluster_events(events):
                 <= CLUSTER_TIME_MINUTES
             ):
 
-                cluster["events"].append(
+                cluster[
+                    "events"
+                ].append(
                     event
                 )
 
-                cluster["total_frp"] += (
-                    event["frp"]
-                )
+                cluster[
+                    "total_frp"
+                ] += event["frp"]
 
-                cluster["max_frp"] = max(
+                cluster[
+                    "max_frp"
+                ] = max(
                     cluster["max_frp"],
                     event["frp"]
                 )
 
-                cluster["latest"] = max(
+                cluster[
+                    "latest"
+                ] = max(
                     cluster["latest"],
                     event["datetime"]
                 )
 
-                # إعادة حساب المركز
                 count = len(
                     cluster["events"]
                 )
 
-                cluster["center"]["lat"] = (
+                cluster[
+                    "center"
+                ]["lat"] = (
                     sum(
                         e["lat"]
-                        for e in cluster["events"]
+                        for e
+                        in cluster[
+                            "events"
+                        ]
                     ) / count
                 )
 
-                cluster["center"]["lon"] = (
+                cluster[
+                    "center"
+                ]["lon"] = (
                     sum(
                         e["lon"]
-                        for e in cluster["events"]
+                        for e
+                        in cluster[
+                            "events"
+                        ]
                     ) / count
                 )
 
@@ -664,7 +853,9 @@ def cluster_events(events):
                         "lat": event["lat"],
                         "lon": event["lon"]
                     },
-                    "events": [event],
+                    "events": [
+                        event
+                    ],
                     "total_frp": event["frp"],
                     "max_frp": event["frp"],
                     "latest": event["datetime"]
@@ -675,31 +866,39 @@ def cluster_events(events):
 
 
 # ============================================================
-# Risk Engine
+# 🤖 AI Risk Engine
 # ============================================================
 
 def calculate_risk(cluster):
 
+    events = cluster[
+        "events"
+    ]
+
     count = len(
-        cluster["events"]
+        events
     )
 
-    max_frp = cluster["max_frp"]
+    max_frp = cluster[
+        "max_frp"
+    ]
 
-    total_frp = cluster["total_frp"]
+    total_frp = cluster[
+        "total_frp"
+    ]
 
     avg_confidence = (
         sum(
             e["confidence"]
-            for e in cluster["events"]
+            for e in events
         )
         /
         count
     )
 
-    # -------------------------------
-    # FRP Score
-    # -------------------------------
+    # --------------------------------------------------------
+    # FRP
+    # --------------------------------------------------------
 
     if max_frp >= 150:
         frp_score = 100
@@ -722,41 +921,64 @@ def calculate_risk(cluster):
     else:
         frp_score = 20
 
-    # -------------------------------
-    # Cluster Score
-    # -------------------------------
+    # --------------------------------------------------------
+    # عدد النقاط
+    # --------------------------------------------------------
 
     if count >= 10:
         cluster_score = 100
 
     elif count >= 6:
-        cluster_score = 85
+        cluster_score = 90
+
+    elif count >= 4:
+        cluster_score = 80
 
     elif count >= 3:
         cluster_score = 70
 
     elif count >= 2:
-        cluster_score = 50
+        cluster_score = 55
 
     else:
         cluster_score = 20
 
-    # -------------------------------
-    # Confidence
-    # -------------------------------
+    # --------------------------------------------------------
+    # حداثة البيانات
+    # --------------------------------------------------------
 
-    confidence_score_value = avg_confidence
+    latest_age = min(
+        e["age_hours"]
+        for e in events
+    )
 
-    # -------------------------------
-    # Final Score
-    # -------------------------------
+    if latest_age <= 1:
+        freshness_score = 100
+
+    elif latest_age <= 3:
+        freshness_score = 90
+
+    elif latest_age <= 6:
+        freshness_score = 75
+
+    elif latest_age <= 12:
+        freshness_score = 60
+
+    else:
+        freshness_score = 40
+
+    # --------------------------------------------------------
+    # AI Score
+    # --------------------------------------------------------
 
     risk = (
-        frp_score * 0.45
+        frp_score * 0.40
         +
         cluster_score * 0.30
         +
-        confidence_score_value * 0.25
+        avg_confidence * 0.20
+        +
+        freshness_score * 0.10
     )
 
     risk = round(
@@ -770,20 +992,67 @@ def calculate_risk(cluster):
     )
 
     if risk >= 80:
+
         level = "حرج"
         emoji = "🔴"
 
     elif risk >= 60:
+
         level = "مرتفع"
         emoji = "🟠"
 
-    elif risk >= 40:
+    elif risk >= 45:
+
         level = "متوسط"
         emoji = "🟡"
 
     else:
+
         level = "منخفض"
         emoji = "🟢"
+
+    # --------------------------------------------------------
+    # تفسير ذكي
+    # --------------------------------------------------------
+
+    if (
+        count >= 4
+        and
+        max_frp >= 70
+    ):
+
+        assessment = (
+            "بؤرة حرارية قوية ومتجمعة "
+            "وتستحق المتابعة العاجلة"
+        )
+
+    elif count >= 3:
+
+        assessment = (
+            "تجمع حراري متعدد النقاط "
+            "ويستحق المتابعة"
+        )
+
+    elif max_frp >= 100:
+
+        assessment = (
+            "نقطة حرارية عالية الشدة "
+            "وتحتاج للتحقق والمتابعة"
+        )
+
+    elif max_frp >= 50:
+
+        assessment = (
+            "نشاط حراري ملحوظ "
+            "ويحتاج إلى المراقبة"
+        )
+
+    else:
+
+        assessment = (
+            "نشاط حراري محدود "
+            "مع حاجة للمراقبة"
+        )
 
     return {
         "score": risk,
@@ -794,40 +1063,53 @@ def calculate_risk(cluster):
         ),
         "max_frp": max_frp,
         "total_frp": total_frp,
-        "count": count
+        "count": count,
+        "freshness": round(
+            freshness_score
+        ),
+        "assessment": assessment
     }
 
 
 # ============================================================
-# Cluster ID
+# 🆔 Cluster ID
 # ============================================================
 
 def cluster_id(cluster):
 
     lat = round(
-        cluster["center"]["lat"],
+        cluster[
+            "center"
+        ]["lat"],
         2
     )
 
     lon = round(
-        cluster["center"]["lon"],
+        cluster[
+            "center"
+        ]["lon"],
         2
     )
 
-    date = cluster["latest"].strftime(
-        "%Y-%m-%d"
+    latest = cluster[
+        "latest"
+    ].strftime(
+        "%Y-%m-%d-%H"
     )
 
     return (
-        f"{lat}_{lon}_{date}"
+        f"{lat}_{lon}_{latest}"
     )
 
 
 # ============================================================
-# Google Maps
+# 🗺️ Google Maps
 # ============================================================
 
-def google_maps(lat, lon):
+def google_maps(
+    lat,
+    lon
+):
 
     return (
         "https://www.google.com/maps"
@@ -836,56 +1118,60 @@ def google_maps(lat, lon):
 
 
 # ============================================================
-# المنطقة التقريبية
-#
-# V5.0 لا يستخدم Polygon رسمي.
-# لذلك نكتب "تحديد إداري لاحقاً".
+# 🇸🇦 المنطقة التقريبية
 # ============================================================
 
-def approximate_region(lat, lon):
+def approximate_region(
+    lat,
+    lon
+):
 
     if lat >= 28:
         return "شمال المملكة"
 
     if lat >= 24 and lon < 44:
-        return "منطقة المدينة المنورة / شمال غرب المملكة"
+        return "المدينة المنورة / شمال غرب المملكة"
 
     if lat >= 22 and lon < 48:
-        return "منطقة الرياض / وسط المملكة"
+        return "الرياض / وسط المملكة"
 
     if lat < 22 and lon < 44:
-        return "منطقة جازان / جنوب غرب المملكة"
+        return "جازان / جنوب غرب المملكة"
 
     if lon >= 48:
-        return "شرق المملكة"
+        return "المنطقة الشرقية"
 
     return "المملكة العربية السعودية"
 
 
 # ============================================================
-# تقرير عدم وجود حرائق
+# 🟢 تقرير طبيعي
 # ============================================================
 
 def send_no_fire_report(
     raw_count,
-    normalized_count
+    analyzed_count
 ):
 
     message = f"""
-🟢 رصد حرائق السعودية V5
+🟢 رصد حرائق السعودية — V5 AI
 
 🕒 {now_ksa()}
 
-✅ لا توجد بؤر حرائق تستوفي معايير التنبيه حالياً.
+✅ لا توجد بؤر حرائق تستدعي التنبيه حالياً.
 
 📊 بيانات FIRMS المستلمة: {raw_count}
-🧪 النقاط بعد التحليل: {normalized_count}
-🔥 البؤر المكتشفة: 0
+🧪 النقاط بعد التحليل: {analyzed_count}
+🚨 البؤر المستوفية لمعايير التنبيه: 0
 
-🛰️ المصدر: NASA FIRMS / VIIRS
-🤖 محرك التحليل: V5 Intelligent Fire Intelligence Engine
+🛰️ المصدر:
+NASA FIRMS / VIIRS
 
-الحالة: النظام يعمل بشكل طبيعي
+🤖 محرك التحليل:
+V5.1 Intelligent Fire Intelligence Engine
+
+📡 الحالة:
+النظام يعمل بشكل طبيعي
 """
 
     tg_send(
@@ -894,16 +1180,15 @@ def send_no_fire_report(
 
 
 # ============================================================
-# التقرير الرئيسي
+# 🚨 تقرير الحريق
 # ============================================================
 
 def send_fire_report(
     clusters,
     raw_count,
-    normalized_count
+    analyzed_count
 ):
 
-    # ترتيب حسب الخطورة
     clusters = sorted(
         clusters,
         key=lambda c: (
@@ -914,14 +1199,23 @@ def send_fire_report(
         reverse=True
     )
 
-    top = clusters[:TOP_CLUSTERS]
+    top = clusters[
+        :TOP_CLUSTERS
+    ]
 
     highest = top[0]
 
-    lat = highest["center"]["lat"]
-    lon = highest["center"]["lon"]
+    lat = highest[
+        "center"
+    ]["lat"]
 
-    risk = highest["risk"]
+    lon = highest[
+        "center"
+    ]["lon"]
+
+    risk = highest[
+        "risk"
+    ]
 
     region = approximate_region(
         lat,
@@ -931,7 +1225,7 @@ def send_fire_report(
     message = []
 
     message.append(
-        "🔥 رصد حرائق السعودية V5"
+        "🔥 تنبيه حرائق السعودية — V5 AI"
     )
 
     message.append(
@@ -941,15 +1235,13 @@ def send_fire_report(
     message.append("")
 
     message.append(
-        f"🚨 البؤر المكتشفة: {len(clusters)}"
+        f"🚨 البؤر التي تستدعي المتابعة: "
+        f"{len(clusters)}"
     )
 
     message.append(
-        f"📊 النقاط الحرارية المحللة: {normalized_count}"
-    )
-
-    message.append(
-        f"📡 بيانات FIRMS المستلمة: {raw_count}"
+        f"📊 النقاط الحرارية المحللة: "
+        f"{analyzed_count}"
     )
 
     message.append("")
@@ -959,8 +1251,19 @@ def send_fire_report(
     )
 
     message.append(
-        f"{risk['emoji']} {risk['level']} "
+        f"{risk['emoji']} "
+        f"{risk['level']} "
         f"— {risk['score']}/100"
+    )
+
+    message.append("")
+
+    message.append(
+        "🤖 التقييم الذكي:"
+    )
+
+    message.append(
+        risk["assessment"]
     )
 
     message.append("")
@@ -974,9 +1277,13 @@ def send_fire_report(
         start=1
     ):
 
-        c = cluster["center"]
+        c = cluster[
+            "center"
+        ]
 
-        r = cluster["risk"]
+        r = cluster[
+            "risk"
+        ]
 
         region_name = approximate_region(
             c["lat"],
@@ -990,12 +1297,13 @@ def send_fire_report(
         message.append(
             f"""
 {index}) {r['emoji']} {r['level']} — {r['score']}/100
-📍 {c['lat']:.4f}, {c['lon']:.4f}
+📍 الموقع: {c['lat']:.4f}, {c['lon']:.4f}
 🗺️ النطاق: {region_name}
 🔥 عدد النقاط: {r['count']}
-⚡ أعلى FRP: {r['max_frp']:.1f} MW
+⚡ أعلى شدة: {r['max_frp']:.1f} MW
 📊 إجمالي FRP: {r['total_frp']:.1f} MW
 🎯 الثقة: {confidence}
+🤖 التقييم: {r['assessment']}
 """
         )
 
@@ -1025,7 +1333,7 @@ def send_fire_report(
     )
 
     message.append(
-        "V5 Intelligent Fire Intelligence Engine"
+        "V5.1 Intelligent Fire Intelligence Engine"
     )
 
     message.append("")
@@ -1051,17 +1359,17 @@ def send_fire_report(
 
 def main():
 
-    print("=" * 60)
+    print("=" * 65)
 
     print(
-        "🔥 Saudi Wildfire Intelligence V5.0"
+        "🔥 Saudi Wildfire Intelligence V5.1 AI"
     )
 
     print(
         f"🕒 {now_ksa()}"
     )
 
-    print("=" * 60)
+    print("=" * 65)
 
     state = load_state()
 
@@ -1073,7 +1381,7 @@ def main():
     all_rows = []
 
     # ========================================================
-    # جلب البيانات
+    # قراءة الأقمار
     # ========================================================
 
     for source in SOURCES:
@@ -1111,11 +1419,12 @@ def main():
     )
 
     print(
-        f"🧪 After filtering: {len(events)}"
+        f"🧪 After Saudi + AI filtering: "
+        f"{len(events)}"
     )
 
     # ========================================================
-    # Duplicate removal
+    # إزالة التكرار
     # ========================================================
 
     events = remove_duplicates(
@@ -1123,11 +1432,12 @@ def main():
     )
 
     print(
-        f"🔁 After duplicates: {len(events)}"
+        f"🔁 After duplicates: "
+        f"{len(events)}"
     )
 
     # ========================================================
-    # NEW EVENT DETECTION
+    # تسجيل الأحداث الجديدة
     # ========================================================
 
     new_events = []
@@ -1141,23 +1451,23 @@ def main():
             f"{event['time']}"
         )
 
-        if uid in seen:
-            continue
+        if uid not in seen:
 
-        seen[uid] = now_utc().isoformat()
+            seen[uid] = (
+                now_utc().isoformat()
+            )
 
-        new_events.append(
-            event
-        )
+            new_events.append(
+                event
+            )
 
     print(
-        f"🆕 New events: {len(new_events)}"
+        f"🆕 New events: "
+        f"{len(new_events)}"
     )
 
     # ========================================================
-    # مهم:
-    # V5 يحلل البيانات الحالية كلها،
-    # وليس فقط النقاط الجديدة.
+    # Clustering
     # ========================================================
 
     clusters = cluster_events(
@@ -1165,7 +1475,8 @@ def main():
     )
 
     print(
-        f"🔥 Clusters: {len(clusters)}"
+        f"🔥 Clusters: "
+        f"{len(clusters)}"
     )
 
     # ========================================================
@@ -1187,27 +1498,58 @@ def main():
         )
 
     # ========================================================
-    # إزالة البؤر منخفضة جداً
+    # Alert filtering
     # ========================================================
 
     alert_clusters = []
 
     for cluster in valid_clusters:
 
-        risk = cluster["risk"]
+        risk = cluster[
+            "risk"
+        ]
 
-        # بؤرة من نقطة واحدة ضعيفة جداً
-        # لا تعتبر تنبيهاً رئيسياً
-        if (
-            risk["score"] < 40
-            and
-            risk["count"] == 1
-        ):
-            continue
+        count = risk[
+            "count"
+        ]
 
-        alert_clusters.append(
-            cluster
-        )
+        score = risk[
+            "score"
+        ]
+
+        max_frp = risk[
+            "max_frp"
+        ]
+
+        # ----------------------------------------------------
+        # بؤرة متعددة النقاط
+        # ----------------------------------------------------
+
+        if count >= 2:
+
+            if score >= MIN_ALERT_SCORE:
+
+                alert_clusters.append(
+                    cluster
+                )
+
+        # ----------------------------------------------------
+        # نقطة واحدة
+        # ----------------------------------------------------
+
+        else:
+
+            if (
+                score
+                >=
+                SINGLE_POINT_MIN_SCORE
+                and
+                max_frp >= 50
+            ):
+
+                alert_clusters.append(
+                    cluster
+                )
 
     print(
         f"🚨 Alert clusters: "
@@ -1220,10 +1562,12 @@ def main():
 
     if not alert_clusters:
 
-        send_no_fire_report(
-            raw_count,
-            len(events)
-        )
+        if SEND_NORMAL_STATUS:
+
+            send_no_fire_report(
+                raw_count,
+                len(events)
+            )
 
     else:
 
@@ -1234,7 +1578,7 @@ def main():
         )
 
     # ========================================================
-    # حفظ State
+    # حفظ الحالة
     # ========================================================
 
     state["seen"] = seen
@@ -1244,11 +1588,14 @@ def main():
     )
 
     print(
-        "✅ V5 completed successfully"
+        "✅ V5.1 AI completed successfully"
     )
 
 
 # ============================================================
+# تشغيل النظام
+# ============================================================
 
 if __name__ == "__main__":
+
     main()
