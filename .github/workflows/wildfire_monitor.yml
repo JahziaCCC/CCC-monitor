@@ -1,42 +1,163 @@
-name: Wildfire Monitor (KSA + Red Sea + Gulf)
+name: Wildfire Monitor - Saudi Arabia V5.8
 
 on:
   schedule:
-    - cron: "0 * * * *"   # كل ساعة
+    - cron: "0 * * * *"
+
   workflow_dispatch:
 
 jobs:
+
   run:
+
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+      pages: write
+      id-token: write
 
     steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests matplotlib
 
-      - name: Run monitor
+          python -m pip install --upgrade pip
+
+          pip install requests
+
+
+      # ======================================================
+      # RUN WILDFIRE ENGINE
+      # ======================================================
+
+      - name: Run Saudi Wildfire Intelligence V5.8
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
           FIRMS_API_KEY: ${{ secrets.FIRMS_API_KEY }}
+
         run: |
+
           python wildfire_monitor.py
 
-      - name: Commit state file
+
+      # ======================================================
+      # VERIFY STATE
+      # ======================================================
+
+      - name: Verify wildfire state
         run: |
+
+          echo "=============================================="
+
+          echo "🔥 Wildfire V5.8 State Verification"
+
+          echo "=============================================="
+
+          if [ -f wildfire_state_v58.json ]; then
+
+            echo "✅ wildfire_state_v58.json exists"
+
+            echo "📊 File size:"
+
+            ls -lh wildfire_state_v58.json
+
+          else
+
+            echo "❌ wildfire_state_v58.json NOT FOUND"
+
+            exit 1
+
+          fi
+
+
+      # ======================================================
+      # PREPARE DASHBOARD DATA
+      # ======================================================
+
+      - name: Prepare monitoring data
+        run: |
+
+          mkdir -p dashboard/data
+
+          cp wildfire_state_v58.json dashboard/data/wildfire_state_v58.json
+
+          echo "✅ Dashboard data prepared"
+
+          echo "📁 dashboard/data/wildfire_state_v58.json"
+
+          ls -lh dashboard/data/wildfire_state_v58.json
+
+
+      # ======================================================
+      # COMMIT STATE
+      # ======================================================
+
+      - name: Commit wildfire state
+        run: |
+
           git config user.name "github-actions"
+
           git config user.email "github-actions@github.com"
-          git add wildfire_state.json || true
-          git commit -m "Update wildfire state" || true
+
+          git add wildfire_state_v58.json
+
+          git add dashboard/data/wildfire_state_v58.json
+
+          git diff --cached --quiet || git commit -m "Update Saudi wildfire monitoring state"
+
           git push || true
+
+
+      # ======================================================
+      # GITHUB PAGES
+      # ======================================================
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+
+      # ======================================================
+      # UPLOAD DASHBOARD
+      # ======================================================
+
+      - name: Upload Dashboard
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dashboard
+
+
+      # ======================================================
+      # DEPLOY DASHBOARD
+      # ======================================================
+
+      - name: Deploy Dashboard
+        uses: actions/deploy-pages@v4
