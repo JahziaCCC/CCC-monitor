@@ -26,149 +26,149 @@
   },
   "clusters": {
     "27.15_49.22": {
-      "risk": 52,
-      "verification": 52,
-      "persistence": 20,
+      "risk": 60,
+      "verification": 58,
+      "persistence": 65,
       "lat": 27.146234999999997,
       "lon": 49.222875,
       "count": 2,
       "max_frp": 80.51,
       "total_frp": 117.14000000000001,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.769949+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007318+00:00"
     },
     "26.95_49.6": {
-      "risk": 41,
-      "verification": 42,
-      "persistence": 20,
+      "risk": 50,
+      "verification": 49,
+      "persistence": 65,
       "lat": 26.948909999999998,
       "lon": 49.595394999999996,
       "count": 2,
       "max_frp": 26.86,
       "total_frp": 49.66,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.769970+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007369+00:00"
     },
     "25.25_48.1": {
-      "risk": 52,
-      "verification": 54,
-      "persistence": 20,
+      "risk": 61,
+      "verification": 60,
+      "persistence": 65,
       "lat": 25.253255,
       "lon": 48.104865000000004,
       "count": 2,
       "max_frp": 20.09,
       "total_frp": 40.18,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.769983+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007405+00:00"
     },
     "23.95_38.28": {
-      "risk": 50,
-      "verification": 55,
-      "persistence": 20,
+      "risk": 59,
+      "verification": 62,
+      "persistence": 65,
       "lat": 23.949208333333335,
       "lon": 38.277359999999994,
       "count": 6,
       "max_frp": 16.44,
       "total_frp": 71.74,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.769997+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007438+00:00"
     },
     "24.19_38.03": {
-      "risk": 42,
-      "verification": 44,
-      "persistence": 20,
+      "risk": 51,
+      "verification": 51,
+      "persistence": 65,
       "lat": 24.185405,
       "lon": 38.03209,
       "count": 2,
       "max_frp": 13.64,
       "total_frp": 23.69,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770009+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007496+00:00"
     },
     "25.56_49.37": {
-      "risk": 23,
-      "verification": 23,
-      "persistence": 20,
+      "risk": 32,
+      "verification": 30,
+      "persistence": 65,
       "lat": 25.56421,
       "lon": 49.36814,
       "count": 1,
       "max_frp": 8.36,
       "total_frp": 8.36,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770024+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007546+00:00"
     },
     "24.79_49.35": {
-      "risk": 30,
-      "verification": 34,
-      "persistence": 20,
+      "risk": 40,
+      "verification": 40,
+      "persistence": 65,
       "lat": 24.791345,
       "lon": 49.349495000000005,
       "count": 2,
       "max_frp": 7.15,
       "total_frp": 12.77,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770036+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007588+00:00"
     },
     "22.71_39.04": {
-      "risk": 36,
-      "verification": 39,
-      "persistence": 20,
+      "risk": 45,
+      "verification": 46,
+      "persistence": 65,
       "lat": 22.705405,
       "lon": 39.035775,
       "count": 2,
       "max_frp": 6.93,
       "total_frp": 12.21,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770055+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007656+00:00"
     },
     "24.76_50.42": {
-      "risk": 23,
-      "verification": 23,
-      "persistence": 20,
+      "risk": 32,
+      "verification": 30,
+      "persistence": 65,
       "lat": 24.76222,
       "lon": 50.41524,
       "count": 1,
       "max_frp": 5.0,
       "total_frp": 5.0,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770066+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007706+00:00"
     },
     "24.03_49.08": {
-      "risk": 23,
-      "verification": 23,
-      "persistence": 20,
+      "risk": 32,
+      "verification": 30,
+      "persistence": 65,
       "lat": 24.02836,
       "lon": 49.08067,
       "count": 1,
       "max_frp": 4.47,
       "total_frp": 4.47,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770077+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007753+00:00"
     },
     "24.95_49.38": {
-      "risk": 23,
-      "verification": 23,
-      "persistence": 20,
+      "risk": 32,
+      "verification": 30,
+      "persistence": 65,
       "lat": 24.95218,
       "lon": 49.37904,
       "count": 1,
       "max_frp": 3.59,
       "total_frp": 3.59,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770108+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007798+00:00"
     },
     "21.37_39.44": {
-      "risk": 29,
-      "verification": 29,
-      "persistence": 20,
+      "risk": 38,
+      "verification": 36,
+      "persistence": 65,
       "lat": 21.37471,
       "lon": 39.44204,
       "count": 1,
       "max_frp": 3.27,
       "total_frp": 3.27,
-      "observations": 1,
-      "last_seen": "2026-08-25T17:32:48.770120+00:00"
+      "observations": 2,
+      "last_seen": "2026-08-25T18:41:07.007845+00:00"
     }
   },
-  "last_run": "2026-08-25T17:32:49.245781+00:00"
+  "last_run": "2026-08-25T18:41:07.649750+00:00"
 }
