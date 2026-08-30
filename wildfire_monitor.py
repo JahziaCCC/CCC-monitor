@@ -3,26 +3,31 @@ import json
 import math
 import datetime
 import time
+import csv
+import io
 import requests
 
 
 # ============================================================
-# 🔥 Saudi Wildfire Intelligence V5.9.3
+# 🔥 Saudi Wildfire Intelligence V5.9.4
 # Government Monitoring Center Engine
 #
 # NASA FIRMS + VIIRS
 #
-# V5.9.3 ADDITIONS:
-# - Government Monitoring Center
-# - National Situation Index
-# - Detection vs Operational Events
-# - Operational Priority
-# - Trigger Intelligence
-# - Event Lifecycle
+# V5.9.4
+# ------------------------------------------------------------
+# IMPROVEMENTS:
+#
+# - Persistent Event Matching
 # - Stable Event ID
-# - First Seen / Last Seen
-# - Observation Count
-# - Operational Decision
+# - Spatial Event Continuity
+# - True Observation History
+# - Event Lifecycle 2.0
+# - Improved Geographic Classification
+# - Improved Operational Priority
+# - Risk / Verification separation
+# - Improved Trigger Intelligence
+# - National Situation Index
 #
 # PRESERVED:
 # - Saudi Polygon Validation
@@ -66,7 +71,7 @@ KSA_TZ = datetime.timezone(
 # STATE
 # ============================================================
 
-STATE_FILE = "wildfire_state_v593.json"
+STATE_FILE = "wildfire_state_v594.json"
 
 
 # ============================================================
@@ -132,30 +137,37 @@ PERSISTENCE_COUNT_WEIGHT = 0.45
 
 
 # ============================================================
+# EVENT CONTINUITY SETTINGS
+# ============================================================
+
+# الحد الأقصى للمسافة لربط الحدث الحالي بالحدث السابق
+EVENT_MATCH_RADIUS_KM = 7.0
+
+# الحد الأقصى للفاصل الزمني لاعتبار الحدث مستمرًا
+EVENT_CONTINUITY_HOURS = 72
+
+# إذا تجاوز الفاصل هذه القيمة يعتبر الحدث متجددًا
+EVENT_REACTIVATION_HOURS = 24
+
+
+# ============================================================
 # HISTORICAL MEMORY
 # ============================================================
 
 HISTORY_MEMORY_HOURS = 168
 MAX_HISTORY_CLUSTERS = 500
+MAX_EVENTS = 1000
 
 
 # ============================================================
-# 🏛️ GOVERNMENT MONITORING CENTER SETTINGS
+# 🏛️ GOVERNMENT MONITORING CENTER
 # ============================================================
 
-# الحد الأدنى لتحويل البؤرة إلى حدث تشغيلي
 OPERATIONAL_EVENT_MIN_PRIORITY = 35
 
-# الحد الأدنى لإدراج الحدث ضمن "تحت المراقبة"
 MONITORING_PRIORITY = 35
-
-# الحد الأدنى للتحقق
 VERIFICATION_PRIORITY = 60
-
-# الحد الأدنى للتصعيد
 ESCALATION_PRIORITY = 75
-
-# الحد الأدنى للتصعيد العاجل
 CRITICAL_PRIORITY = 90
 
 
@@ -164,7 +176,7 @@ CRITICAL_PRIORITY = 90
 # ============================================================
 
 HTTP_HEADERS = {
-    "User-Agent": "Saudi-Wildfire-Intelligence-V5.9.3",
+    "User-Agent": "Saudi-Wildfire-Intelligence-V5.9.4",
     "Accept": "text/csv,*/*",
     "Connection": "close",
 }
@@ -259,11 +271,17 @@ SAUDI_POLYGON = [
 # ============================================================
 
 def now_utc():
-    return datetime.datetime.now(datetime.timezone.utc)
+
+    return datetime.datetime.now(
+        datetime.timezone.utc
+    )
 
 
 def now_ksa():
-    return datetime.datetime.now(KSA_TZ).strftime(
+
+    return datetime.datetime.now(
+        KSA_TZ
+    ).strftime(
         "%Y-%m-%d %H:%M KSA"
     )
 
@@ -273,6 +291,7 @@ def now_ksa():
 # ============================================================
 
 def default_state():
+
     return {
         "seen": {},
         "clusters": {},
@@ -286,6 +305,7 @@ def default_state():
 def load_state():
 
     if not os.path.exists(STATE_FILE):
+
         return default_state()
 
     try:
@@ -298,21 +318,38 @@ def load_state():
 
             state = json.load(f)
 
-        if not isinstance(state, dict):
+        if not isinstance(
+            state,
+            dict
+        ):
+
             return default_state()
 
-        state.setdefault("seen", {})
-        state.setdefault("clusters", {})
-        state.setdefault("history", {})
-        state.setdefault("alerts", {})
-        state.setdefault("events", {})
-        state.setdefault("last_run", None)
+        for key in [
+            "seen",
+            "clusters",
+            "history",
+            "alerts",
+            "events"
+        ]:
+
+            state.setdefault(
+                key,
+                {}
+            )
+
+        state.setdefault(
+            "last_run",
+            None
+        )
 
         return state
 
     except Exception as e:
 
-        print(f"⚠️ State load error: {e}")
+        print(
+            f"⚠️ State load error: {e}"
+        )
 
         return default_state()
 
@@ -325,12 +362,18 @@ def save_state(state):
 
     now = now_utc()
 
-    seen_cutoff = now - datetime.timedelta(
-        hours=CLUSTER_MEMORY_HOURS
+    seen_cutoff = (
+        now -
+        datetime.timedelta(
+            hours=CLUSTER_MEMORY_HOURS
+        )
     )
 
-    history_cutoff = now - datetime.timedelta(
-        hours=HISTORY_MEMORY_HOURS
+    history_cutoff = (
+        now -
+        datetime.timedelta(
+            hours=HISTORY_MEMORY_HOURS
+        )
     )
 
     # --------------------------------------------------------
@@ -339,16 +382,23 @@ def save_state(state):
 
     cleaned_seen = {}
 
-    for key, value in state.get("seen", {}).items():
+    for key, value in state.get(
+        "seen",
+        {}
+    ).items():
 
         try:
 
-            dt = datetime.datetime.fromisoformat(value)
+            dt = datetime.datetime.fromisoformat(
+                value
+            )
 
             if dt >= seen_cutoff:
+
                 cleaned_seen[key] = value
 
         except Exception:
+
             pass
 
     state["seen"] = cleaned_seen
@@ -359,18 +409,25 @@ def save_state(state):
 
     cleaned_clusters = {}
 
-    for key, value in state.get("clusters", {}).items():
+    for key, value in state.get(
+        "clusters",
+        {}
+    ).items():
 
         try:
 
             dt = datetime.datetime.fromisoformat(
-                value.get("last_seen")
+                value.get(
+                    "last_seen"
+                )
             )
 
             if dt >= seen_cutoff:
+
                 cleaned_clusters[key] = value
 
         except Exception:
+
             pass
 
     state["clusters"] = cleaned_clusters
@@ -381,33 +438,45 @@ def save_state(state):
 
     cleaned_history = {}
 
-    for key, value in state.get("history", {}).items():
+    for key, value in state.get(
+        "history",
+        {}
+    ).items():
 
         try:
 
             dt = datetime.datetime.fromisoformat(
-                value.get("last_seen")
+                value.get(
+                    "last_seen"
+                )
             )
 
             if dt >= history_cutoff:
+
                 cleaned_history[key] = value
 
         except Exception:
+
             pass
 
-    if len(cleaned_history) > MAX_HISTORY_CLUSTERS:
+    if len(
+        cleaned_history
+    ) > MAX_HISTORY_CLUSTERS:
 
         ordered = sorted(
             cleaned_history.items(),
-            key=lambda item: item[1].get(
-                "last_seen",
-                ""
-            ),
+            key=lambda item:
+                item[1].get(
+                    "last_seen",
+                    ""
+                ),
             reverse=True
         )
 
         cleaned_history = dict(
-            ordered[:MAX_HISTORY_CLUSTERS]
+            ordered[
+                :MAX_HISTORY_CLUSTERS
+            ]
         )
 
     state["history"] = cleaned_history
@@ -418,20 +487,30 @@ def save_state(state):
 
     cleaned_alerts = {}
 
-    alert_cutoff = now - datetime.timedelta(
-        hours=HISTORY_MEMORY_HOURS
+    alert_cutoff = (
+        now -
+        datetime.timedelta(
+            hours=HISTORY_MEMORY_HOURS
+        )
     )
 
-    for key, value in state.get("alerts", {}).items():
+    for key, value in state.get(
+        "alerts",
+        {}
+    ).items():
 
         try:
 
-            dt = datetime.datetime.fromisoformat(value)
+            dt = datetime.datetime.fromisoformat(
+                value
+            )
 
             if dt >= alert_cutoff:
+
                 cleaned_alerts[key] = value
 
         except Exception:
+
             pass
 
     state["alerts"] = cleaned_alerts
@@ -442,23 +521,52 @@ def save_state(state):
 
     cleaned_events = {}
 
-    for key, value in state.get("events", {}).items():
+    for key, value in state.get(
+        "events",
+        {}
+    ).items():
 
         try:
 
             dt = datetime.datetime.fromisoformat(
-                value.get("last_seen")
+                value.get(
+                    "last_seen"
+                )
             )
 
             if dt >= history_cutoff:
+
                 cleaned_events[key] = value
 
         except Exception:
+
             pass
+
+    if len(
+        cleaned_events
+    ) > MAX_EVENTS:
+
+        ordered_events = sorted(
+            cleaned_events.items(),
+            key=lambda item:
+                item[1].get(
+                    "last_seen",
+                    ""
+                ),
+            reverse=True
+        )
+
+        cleaned_events = dict(
+            ordered_events[
+                :MAX_EVENTS
+            ]
+        )
 
     state["events"] = cleaned_events
 
-    state["last_run"] = now.isoformat()
+    state["last_run"] = (
+        now.isoformat()
+    )
 
     with open(
         STATE_FILE,
@@ -499,7 +607,9 @@ def tg_send(text):
 
     response.raise_for_status()
 
-    print("📨 Telegram report sent")
+    print(
+        "📨 Telegram report sent"
+    )
 
 
 # ============================================================
@@ -508,32 +618,24 @@ def tg_send(text):
 
 def parse_csv(text):
 
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
+    try:
 
-    if len(lines) < 2:
+        reader = csv.DictReader(
+            io.StringIO(text)
+        )
+
+        return [
+            dict(row)
+            for row in reader
+        ]
+
+    except Exception as e:
+
+        print(
+            f"⚠️ CSV parser error: {e}"
+        )
+
         return []
-
-    header = lines[0].split(",")
-
-    rows = []
-
-    for line in lines[1:]:
-
-        columns = line.split(",")
-
-        if len(columns) != len(header):
-            continue
-
-        rows.append({
-            header[i]: columns[i]
-            for i in range(len(header))
-        })
-
-    return rows
 
 
 # ============================================================
@@ -577,10 +679,14 @@ def get_firms_rows(source):
             )
 
             if response.status_code == 200:
-                return parse_csv(response.text)
+
+                return parse_csv(
+                    response.text
+                )
 
             last_error = (
-                f"HTTP {response.status_code}"
+                f"HTTP "
+                f"{response.status_code}"
             )
 
         except Exception as e:
@@ -591,7 +697,8 @@ def get_firms_rows(source):
 
     print(
         f"❌ FIRMS API error "
-        f"({source}): {last_error}"
+        f"({source}): "
+        f"{last_error}"
     )
 
     return []
@@ -601,7 +708,11 @@ def get_firms_rows(source):
 # POINT IN POLYGON
 # ============================================================
 
-def point_in_polygon(lat, lon, polygon):
+def point_in_polygon(
+    lat,
+    lon,
+    polygon
+):
 
     inside = False
 
@@ -610,7 +721,9 @@ def point_in_polygon(lat, lon, polygon):
 
     j = len(polygon) - 1
 
-    for i in range(len(polygon)):
+    for i in range(
+        len(polygon)
+    ):
 
         xi, yi = polygon[i]
         xj, yj = polygon[j]
@@ -619,14 +732,18 @@ def point_in_polygon(lat, lon, polygon):
             (yi > y) != (yj > y)
         ) and (
             x <
-            (xj - xi)
-            * (y - yi)
-            /
-            (yj - yi)
+            (
+                (xj - xi)
+                *
+                (y - yi)
+                /
+                (yj - yi)
+            )
             + xi
         )
 
         if intersects:
+
             inside = not inside
 
         j = i
@@ -638,7 +755,10 @@ def point_in_polygon(lat, lon, polygon):
 # SAUDI VALIDATION
 # ============================================================
 
-def is_inside_saudi(lat, lon):
+def is_inside_saudi(
+    lat,
+    lon
+):
 
     min_lon, min_lat, max_lon, max_lat = BBOX
 
@@ -647,6 +767,7 @@ def is_inside_saudi(lat, lon):
         and
         min_lon <= lon <= max_lon
     ):
+
         return False
 
     return point_in_polygon(
@@ -667,13 +788,31 @@ def parse_acquisition_datetime(
 
     try:
 
-        date_value = str(date_value).strip()
-        time_value = str(time_value).strip().zfill(4)
+        date_value = (
+            str(date_value)
+            .strip()
+        )
 
-        hour = int(time_value[:2])
-        minute = int(time_value[2:4])
+        time_value = (
+            str(time_value)
+            .strip()
+            .zfill(4)
+        )
 
-        if hour > 23 or minute > 59:
+        hour = int(
+            time_value[:2]
+        )
+
+        minute = int(
+            time_value[2:4]
+        )
+
+        if (
+            hour > 23
+            or
+            minute > 59
+        ):
+
             return None
 
         year, month, day = map(
@@ -701,15 +840,31 @@ def parse_acquisition_datetime(
 
 def confidence_score(value):
 
-    value = str(value or "").strip().lower()
+    value = (
+        str(value or "")
+        .strip()
+        .lower()
+    )
 
-    if value in ("h", "high"):
+    if value in (
+        "h",
+        "high"
+    ):
+
         return 90
 
-    if value in ("n", "nominal"):
+    if value in (
+        "n",
+        "nominal"
+    ):
+
         return 65
 
-    if value in ("l", "low"):
+    if value in (
+        "l",
+        "low"
+    ):
+
         return 35
 
     try:
@@ -717,9 +872,11 @@ def confidence_score(value):
         number = float(value)
 
         if number >= 80:
+
             return 90
 
         if number >= 30:
+
             return 65
 
         return 35
@@ -732,9 +889,11 @@ def confidence_score(value):
 def confidence_ar(score):
 
     if score >= 80:
+
         return "عالية"
 
     if score >= 60:
+
         return "متوسطة"
 
     return "منخفضة"
@@ -753,11 +912,22 @@ def distance_km(
 
     earth_radius = 6371.0
 
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
+    lat1_rad = math.radians(
+        lat1
+    )
 
-    dlat = lat2_rad - lat1_rad
-    dlon = math.radians(lon2 - lon1)
+    lat2_rad = math.radians(
+        lat2
+    )
+
+    dlat = (
+        lat2_rad -
+        lat1_rad
+    )
+
+    dlon = math.radians(
+        lon2 - lon1
+    )
 
     a = (
         math.sin(dlat / 2) ** 2
@@ -776,7 +946,9 @@ def distance_km(
         *
         math.atan2(
             math.sqrt(a),
-            math.sqrt(1 - a)
+            math.sqrt(
+                1 - a
+            )
         )
     )
 
@@ -787,14 +959,22 @@ def distance_km(
 
 def is_natural_fire(row):
 
-    value = row.get("type")
+    value = row.get(
+        "type"
+    )
 
-    if value in (None, ""):
+    if value in (
+        None,
+        ""
+    ):
+
         return True
 
     try:
 
-        fire_type = int(float(value))
+        fire_type = int(
+            float(value)
+        )
 
         return fire_type == 0
 
@@ -824,8 +1004,13 @@ def normalize_rows(rows):
 
         try:
 
-            lat = float(row["latitude"])
-            lon = float(row["longitude"])
+            lat = float(
+                row["latitude"]
+            )
+
+            lon = float(
+                row["longitude"]
+            )
 
         except Exception:
 
@@ -843,32 +1028,49 @@ def normalize_rows(rows):
             outside_bbox += 1
             continue
 
-        if not is_inside_saudi(lat, lon):
+        if not is_inside_saudi(
+            lat,
+            lon
+        ):
 
             outside_saudi += 1
             continue
 
-        if not is_natural_fire(row):
+        if not is_natural_fire(
+            row
+        ):
 
             non_natural += 1
             continue
 
-        acquisition = parse_acquisition_datetime(
-            row.get("acq_date"),
-            row.get("acq_time")
+        acquisition = (
+            parse_acquisition_datetime(
+                row.get(
+                    "acq_date"
+                ),
+                row.get(
+                    "acq_time"
+                )
+            )
         )
 
         if acquisition is None:
+
             continue
 
         age_hours = (
-            current_time - acquisition
+            current_time -
+            acquisition
         ).total_seconds() / 3600
 
         if age_hours < 0:
+
             age_hours = 0
 
-        if age_hours > MAX_AGE_HOURS:
+        if (
+            age_hours >
+            MAX_AGE_HOURS
+        ):
 
             old_events += 1
             continue
@@ -876,7 +1078,10 @@ def normalize_rows(rows):
         try:
 
             frp = float(
-                row.get("frp", 0)
+                row.get(
+                    "frp",
+                    0
+                )
             )
 
         except Exception:
@@ -888,35 +1093,64 @@ def normalize_rows(rows):
             low_frp += 1
             continue
 
-        confidence = confidence_score(
-            row.get("confidence")
+        confidence = (
+            confidence_score(
+                row.get(
+                    "confidence"
+                )
+            )
         )
 
         events.append({
 
             "lat": lat,
+
             "lon": lon,
+
             "frp": frp,
+
             "confidence": confidence,
-            "date": row.get("acq_date"),
-            "time": row.get("acq_time"),
+
+            "date": row.get(
+                "acq_date"
+            ),
+
+            "time": row.get(
+                "acq_time"
+            ),
+
             "datetime": acquisition,
+
             "age_hours": age_hours
 
         })
 
     stats = {
 
-        "outside_bbox": outside_bbox,
-        "outside_saudi": outside_saudi,
-        "invalid_coordinates": invalid_coordinates,
-        "old_events": old_events,
-        "low_frp": low_frp,
-        "non_natural": non_natural
+        "outside_bbox":
+            outside_bbox,
+
+        "outside_saudi":
+            outside_saudi,
+
+        "invalid_coordinates":
+            invalid_coordinates,
+
+        "old_events":
+            old_events,
+
+        "low_frp":
+            low_frp,
+
+        "non_natural":
+            non_natural
 
     }
 
-    return events, stats
+    return (
+        events,
+        stats
+    )
 
 
 # ============================================================
@@ -930,8 +1164,14 @@ def remove_duplicates(events):
     for event in events:
 
         key = (
-            round(event["lat"], 3),
-            round(event["lon"], 3),
+            round(
+                event["lat"],
+                3
+            ),
+            round(
+                event["lon"],
+                3
+            ),
             event["date"],
             event["time"]
         )
@@ -940,11 +1180,17 @@ def remove_duplicates(events):
 
             unique[key] = event
 
-        elif event["frp"] > unique[key]["frp"]:
+        elif (
+            event["frp"]
+            >
+            unique[key]["frp"]
+        ):
 
             unique[key] = event
 
-    return list(unique.values())
+    return list(
+        unique.values()
+    )
 
 
 # ============================================================
@@ -957,7 +1203,8 @@ def cluster_events(events):
 
     events = sorted(
         events,
-        key=lambda x: x["frp"],
+        key=lambda x:
+            x["frp"],
         reverse=True
     )
 
@@ -967,7 +1214,9 @@ def cluster_events(events):
 
         for cluster in clusters:
 
-            center = cluster["center"]
+            center = cluster[
+                "center"
+            ]
 
             distance = distance_km(
                 event["lat"],
@@ -985,21 +1234,33 @@ def cluster_events(events):
             ) / 60
 
             if (
-                distance <= CLUSTER_RADIUS_KM
+                distance
+                <= CLUSTER_RADIUS_KM
                 and
-                time_difference <= CLUSTER_TIME_MINUTES
+                time_difference
+                <= CLUSTER_TIME_MINUTES
             ):
 
-                cluster["events"].append(event)
+                cluster[
+                    "events"
+                ].append(
+                    event
+                )
 
-                cluster["total_frp"] += event["frp"]
+                cluster[
+                    "total_frp"
+                ] += event["frp"]
 
-                cluster["max_frp"] = max(
+                cluster[
+                    "max_frp"
+                ] = max(
                     cluster["max_frp"],
                     event["frp"]
                 )
 
-                cluster["latest"] = max(
+                cluster[
+                    "latest"
+                ] = max(
                     cluster["latest"],
                     event["datetime"]
                 )
@@ -1008,19 +1269,25 @@ def cluster_events(events):
                     cluster["events"]
                 )
 
-                cluster["center"]["lat"] = (
+                cluster[
+                    "center"
+                ]["lat"] = (
                     sum(
                         e["lat"]
-                        for e in cluster["events"]
+                        for e in
+                        cluster["events"]
                     )
                     /
                     count
                 )
 
-                cluster["center"]["lon"] = (
+                cluster[
+                    "center"
+                ]["lon"] = (
                     sum(
                         e["lon"]
-                        for e in cluster["events"]
+                        for e in
+                        cluster["events"]
                     )
                     /
                     count
@@ -1034,17 +1301,26 @@ def cluster_events(events):
             clusters.append({
 
                 "center": {
-                    "lat": event["lat"],
-                    "lon": event["lon"]
+
+                    "lat":
+                        event["lat"],
+
+                    "lon":
+                        event["lon"]
+
                 },
 
-                "events": [event],
+                "events":
+                    [event],
 
-                "total_frp": event["frp"],
+                "total_frp":
+                    event["frp"],
 
-                "max_frp": event["frp"],
+                "max_frp":
+                    event["frp"],
 
-                "latest": event["datetime"]
+                "latest":
+                    event["datetime"]
 
             })
 
@@ -1055,24 +1331,32 @@ def cluster_events(events):
 # FRP SCORE
 # ============================================================
 
-def frp_score_value(max_frp):
+def frp_score_value(
+    max_frp
+):
 
     if max_frp >= 150:
+
         return 100
 
     if max_frp >= 100:
+
         return 90
 
     if max_frp >= 70:
+
         return 80
 
     if max_frp >= 40:
+
         return 65
 
     if max_frp >= 20:
+
         return 50
 
     if max_frp >= 10:
+
         return 35
 
     return 20
@@ -1082,21 +1366,28 @@ def frp_score_value(max_frp):
 # CLUSTER SCORE
 # ============================================================
 
-def cluster_score_value(count):
+def cluster_score_value(
+    count
+):
 
     if count >= 10:
+
         return 100
 
     if count >= 7:
+
         return 90
 
     if count >= 5:
+
         return 80
 
     if count >= 3:
+
         return 70
 
     if count >= 2:
+
         return 50
 
     return 20
@@ -1112,20 +1403,27 @@ def calculate_persistence(
 ):
 
     if not previous:
+
         return 20
 
     previous_count = int(
         previous.get(
             "observations",
-            1
+            previous.get(
+                "historical_observations",
+                1
+            )
         )
     )
 
-    previous_last_seen_raw = previous.get(
-        "last_seen"
+    previous_last_seen_raw = (
+        previous.get(
+            "last_seen"
+        )
     )
 
     if not previous_last_seen_raw:
+
         return 20
 
     try:
@@ -1141,13 +1439,20 @@ def calculate_persistence(
         return 20
 
     elapsed_hours = (
-        now_utc() - previous_last_seen
+        now_utc() -
+        previous_last_seen
     ).total_seconds() / 3600
 
     if elapsed_hours < 0:
+
         elapsed_hours = 0
 
-    if elapsed_hours > PERSISTENCE_WINDOW_HOURS:
+    if (
+        elapsed_hours
+        >
+        PERSISTENCE_WINDOW_HOURS
+    ):
+
         return 20
 
     recency = max(
@@ -1163,33 +1468,46 @@ def calculate_persistence(
     )
 
     if previous_count >= 10:
+
         observation_score = 100
 
     elif previous_count >= 7:
+
         observation_score = 90
 
     elif previous_count >= 5:
+
         observation_score = 80
 
     elif previous_count >= 3:
+
         observation_score = 65
 
     elif previous_count >= 2:
+
         observation_score = 50
 
     else:
+
         observation_score = 25
 
     persistence = (
-        recency * PERSISTENCE_TIME_WEIGHT
+        recency
+        *
+        PERSISTENCE_TIME_WEIGHT
         +
-        observation_score * PERSISTENCE_COUNT_WEIGHT
+        observation_score
+        *
+        PERSISTENCE_COUNT_WEIGHT
     )
 
     return round(
         max(
             20,
-            min(100, persistence)
+            min(
+                100,
+                persistence
+            )
         )
     )
 
@@ -1203,24 +1521,39 @@ def calculate_risk(
     persistence_score=20
 ):
 
-    count = len(cluster["events"])
+    count = len(
+        cluster["events"]
+    )
 
-    max_frp = cluster["max_frp"]
+    max_frp = (
+        cluster["max_frp"]
+    )
 
-    total_frp = cluster["total_frp"]
+    total_frp = (
+        cluster["total_frp"]
+    )
 
     avg_confidence = (
         sum(
             e["confidence"]
-            for e in cluster["events"]
+            for e in
+            cluster["events"]
         )
         /
         count
     )
 
-    frp_score = frp_score_value(max_frp)
+    frp_score = (
+        frp_score_value(
+            max_frp
+        )
+    )
 
-    cluster_score = cluster_score_value(count)
+    cluster_score = (
+        cluster_score_value(
+            count
+        )
+    )
 
     risk = (
         frp_score * 0.35
@@ -1235,7 +1568,10 @@ def calculate_risk(
     risk = round(
         min(
             100,
-            max(0, risk)
+            max(
+                0,
+                risk
+            )
         )
     )
 
@@ -1262,12 +1598,24 @@ def calculate_risk(
     return {
 
         "score": risk,
+
         "level": level,
+
         "emoji": emoji,
-        "confidence": round(avg_confidence),
-        "max_frp": max_frp,
-        "total_frp": total_frp,
-        "count": count
+
+        "confidence":
+            round(
+                avg_confidence
+            ),
+
+        "max_frp":
+            max_frp,
+
+        "total_frp":
+            total_frp,
+
+        "count":
+            count
 
     }
 
@@ -1281,25 +1629,34 @@ def calculate_verification_score(
     persistence_score
 ):
 
-    count = len(cluster["events"])
+    count = len(
+        cluster["events"]
+    )
 
-    max_frp = cluster["max_frp"]
+    max_frp = (
+        cluster["max_frp"]
+    )
 
     avg_confidence = (
         sum(
             e["confidence"]
-            for e in cluster["events"]
+            for e in
+            cluster["events"]
         )
         /
         count
     )
 
-    cluster_component = cluster_score_value(
-        count
+    cluster_component = (
+        cluster_score_value(
+            count
+        )
     )
 
-    frp_component = frp_score_value(
-        max_frp
+    frp_component = (
+        frp_score_value(
+            max_frp
+        )
     )
 
     verification = (
@@ -1315,7 +1672,10 @@ def calculate_verification_score(
     return round(
         min(
             100,
-            max(0, verification)
+            max(
+                0,
+                verification
+            )
         )
     )
 
@@ -1370,6 +1730,17 @@ def classify_cluster(
         )
 
     if (
+        count >= 3
+        and
+        max_frp >= 20
+    ):
+
+        return (
+            "بؤرة حرارية متعددة النقاط",
+            "تجمع حراري متعدد النقاط ويستحق المراقبة"
+        )
+
+    if (
         max_frp >= NEW_CLUSTER_STRONG_FRP
         and
         count == 1
@@ -1397,7 +1768,9 @@ def classify_cluster(
 # CLUSTER ID
 # ============================================================
 
-def cluster_id(cluster):
+def cluster_id(
+    cluster
+):
 
     lat = round(
         cluster["center"]["lat"],
@@ -1409,7 +1782,108 @@ def cluster_id(cluster):
         2
     )
 
-    return f"{lat}_{lon}"
+    return (
+        f"{lat}_{lon}"
+    )
+
+
+# ============================================================
+# EVENT MATCH
+# ============================================================
+
+def find_previous_event(
+    cluster,
+    events
+):
+
+    current_lat = (
+        cluster["center"]["lat"]
+    )
+
+    current_lon = (
+        cluster["center"]["lon"]
+    )
+
+    current_time = now_utc()
+
+    best_event = None
+    best_distance = None
+
+    for event_id, event in (
+        events.items()
+    ):
+
+        try:
+
+            last_seen = (
+                datetime.datetime.fromisoformat(
+                    event.get(
+                        "last_seen"
+                    )
+                )
+            )
+
+            lat = float(
+                event.get(
+                    "lat"
+                )
+            )
+
+            lon = float(
+                event.get(
+                    "lon"
+                )
+            )
+
+        except Exception:
+
+            continue
+
+        elapsed = (
+            current_time -
+            last_seen
+        ).total_seconds() / 3600
+
+        if elapsed < 0:
+
+            elapsed = 0
+
+        if (
+            elapsed
+            >
+            EVENT_CONTINUITY_HOURS
+        ):
+
+            continue
+
+        distance = distance_km(
+            current_lat,
+            current_lon,
+            lat,
+            lon
+        )
+
+        if (
+            distance
+            >
+            EVENT_MATCH_RADIUS_KM
+        ):
+
+            continue
+
+        if (
+            best_distance
+            is None
+            or
+            distance
+            <
+            best_distance
+        ):
+
+            best_distance = distance
+            best_event = event
+
+    return best_event
 
 
 # ============================================================
@@ -1421,121 +1895,98 @@ def generate_event_id(
     existing_events
 ):
 
-    cid = cluster_id(cluster)
+    current_date = (
+        datetime.datetime.now(
+            KSA_TZ
+        ).strftime(
+            "%Y%m%d"
+        )
+    )
 
     lat = abs(
         round(
-            cluster["center"]["lat"] * 10
+            cluster["center"]["lat"]
+            * 10
         )
     )
 
     lon = abs(
         round(
-            cluster["center"]["lon"] * 10
+            cluster["center"]["lon"]
+            * 10
         )
     )
 
     base = (
         f"KSA-WF-"
-        f"{datetime.datetime.now(KSA_TZ).strftime('%Y%m%d')}-"
+        f"{current_date}-"
         f"{lat:04d}-"
         f"{lon:04d}"
     )
 
     event_id = base
-
     counter = 1
 
     while (
-        event_id in existing_events
-        and
-        existing_events[event_id].get("cid") != cid
+        event_id
+        in existing_events
     ):
 
         counter += 1
 
         event_id = (
-            f"{base}-{counter:02d}"
+            f"{base}-"
+            f"{counter:02d}"
         )
 
     return event_id
 
 
 # ============================================================
-# HISTORICAL MATCH
+# EVENT CONTINUITY
 # ============================================================
 
-def find_previous_cluster(
+def resolve_event_identity(
     cluster,
-    previous_clusters
+    state
 ):
 
-    current_lat = cluster["center"]["lat"]
-    current_lon = cluster["center"]["lon"]
+    events = state.get(
+        "events",
+        {}
+    )
 
-    current_time = now_utc()
+    previous_event = (
+        find_previous_event(
+            cluster,
+            events
+        )
+    )
 
-    best_match = None
-    best_distance = None
+    if previous_event:
 
-    for previous in previous_clusters.values():
-
-        try:
-
-            previous_last_seen = (
-                datetime.datetime.fromisoformat(
-                    previous.get("last_seen")
-                )
+        event_id = (
+            previous_event.get(
+                "event_id"
             )
-
-        except Exception:
-
-            continue
-
-        age_hours = (
-            current_time - previous_last_seen
-        ).total_seconds() / 3600
-
-        if age_hours < 0:
-            age_hours = 0
-
-        if age_hours > CLUSTER_MEMORY_HOURS:
-            continue
-
-        try:
-
-            previous_lat = float(
-                previous.get("lat")
-            )
-
-            previous_lon = float(
-                previous.get("lon")
-            )
-
-        except Exception:
-
-            continue
-
-        distance = distance_km(
-            current_lat,
-            current_lon,
-            previous_lat,
-            previous_lon
         )
 
-        if distance > TEMPORAL_MATCH_RADIUS_KM:
-            continue
+        return (
+            event_id,
+            previous_event
+        )
 
-        if (
-            best_distance is None
-            or
-            distance < best_distance
-        ):
+    event_id = (
+        generate_event_id(
+            cluster,
+            events
+        )
+    )
 
-            best_distance = distance
-            best_match = previous
-
-    return best_match
+    return (
+        event_id,
+        None
+    )
 
 
 # ============================================================
@@ -1551,25 +2002,37 @@ def calculate_trend(
 
         return (
             "🆕 جديدة",
-            "بؤرة جديدة"
+            "حدث جديد"
         )
 
     old_score = float(
-        previous.get("risk", 0)
+        previous.get(
+            "risk",
+            0
+        )
     )
 
-    new_score = cluster["risk"]["score"]
+    new_score = (
+        cluster["risk"]["score"]
+    )
 
-    difference = new_score - old_score
+    difference = (
+        new_score -
+        old_score
+    )
 
-    if difference >= RISK_CHANGE_ALERT:
+    if difference >= (
+        RISK_CHANGE_ALERT
+    ):
 
         return (
             "📈 تصاعد",
             f"ارتفاع مستوى الخطورة بمقدار {difference} نقطة"
         )
 
-    if difference <= -RISK_CHANGE_ALERT:
+    if difference <= (
+        -RISK_CHANGE_ALERT
+    ):
 
         return (
             "📉 تراجع",
@@ -1583,7 +2046,7 @@ def calculate_trend(
 
 
 # ============================================================
-# 🧠 TRIGGER INTELLIGENCE
+# TRIGGER INTELLIGENCE
 # ============================================================
 
 def calculate_triggers(
@@ -1601,37 +2064,70 @@ def calculate_triggers(
     max_frp = risk["max_frp"]
 
     if previous is None:
-        triggers.append("🆕 حدث جديد")
+
+        triggers.append(
+            "🆕 حدث جديد"
+        )
+
+    else:
+
+        triggers.append(
+            "🔄 حدث مستمر"
+        )
 
     if count >= 3:
-        triggers.append("🔥 تعدد النقاط")
+
+        triggers.append(
+            "🔥 تعدد النقاط"
+        )
 
     if count >= 5:
-        triggers.append("🧩 تجمع حراري قوي")
+
+        triggers.append(
+            "🧩 تجمع حراري قوي"
+        )
 
     if max_frp >= 40:
-        triggers.append("⚡ شدة حرارية مرتفعة")
+
+        triggers.append(
+            "⚡ شدة حرارية مرتفعة"
+        )
 
     if max_frp >= 70:
-        triggers.append("⚡⚡ شدة حرارية شديدة")
+
+        triggers.append(
+            "⚡⚡ شدة حرارية شديدة"
+        )
 
     if persistence >= 50:
-        triggers.append("⏱️ استمرارية حرارية")
+
+        triggers.append(
+            "⏱️ استمرارية حرارية"
+        )
 
     if verification >= 70:
-        triggers.append("🧠 تحقق مرتفع")
+
+        triggers.append(
+            "🧠 تحقق مرتفع"
+        )
 
     if "تصاعد" in trend:
-        triggers.append("📈 تصاعد الخطورة")
+
+        triggers.append(
+            "📈 تصاعد الخطورة"
+        )
 
     if not triggers:
-        triggers.append("👁️ رصد حراري محدود")
+
+        triggers.append(
+            "👁️ رصد حراري محدود"
+        )
 
     return triggers
 
 
 # ============================================================
-# 🎯 OPERATIONAL PRIORITY
+# OPERATIONAL PRIORITY
 # ============================================================
 
 def calculate_operational_priority(
@@ -1650,26 +2146,39 @@ def calculate_operational_priority(
         persistence * 0.15
     )
 
-    # عامل التصاعد
     if "تصاعد" in trend:
+
         score += 8
 
-    # حدث جديد قوي
     if (
         previous is None
         and
         risk["score"] >= 50
     ):
+
         score += 4
 
-    # نقطة قوية جدًا
-    if risk["max_frp"] >= 70:
+    if (
+        risk["max_frp"]
+        >= 70
+    ):
+
         score += 8
+
+    if (
+        risk["count"]
+        >= 5
+    ):
+
+        score += 4
 
     score = round(
         min(
             100,
-            max(0, score)
+            max(
+                0,
+                score
+            )
         )
     )
 
@@ -1704,15 +2213,20 @@ def calculate_operational_priority(
         decision = "روتينية"
 
     return {
+
         "score": score,
+
         "level": level,
+
         "emoji": emoji,
+
         "decision": decision
+
     }
 
 
 # ============================================================
-# 🔄 EVENT LIFECYCLE
+# EVENT LIFECYCLE 2.0
 # ============================================================
 
 def determine_lifecycle(
@@ -1721,30 +2235,55 @@ def determine_lifecycle(
     previous
 ):
 
-    priority = operational["score"]
-
-    decision = operational["decision"]
+    decision = (
+        operational["decision"]
+    )
 
     if decision == "تصعيد عاجل":
-        return "🔴 ESCALATED_CRITICAL"
+
+        return (
+            "🔴 ESCALATED_CRITICAL"
+        )
 
     if decision == "تصعيد":
-        return "🟠 ESCALATED"
+
+        return (
+            "🟠 ESCALATED"
+        )
 
     if decision == "تحقق":
-        return "🟡 VERIFICATION"
+
+        if previous_event:
+
+            return (
+                "🟡 VERIFICATION_ACTIVE"
+            )
+
+        return (
+            "🆕 NEW → VERIFICATION"
+        )
 
     if decision == "مراقبة":
 
         if previous_event:
-            return "👁️ MONITORING"
 
-        return "🆕 NEW → MONITORING"
+            return (
+                "👁️ MONITORING_ACTIVE"
+            )
+
+        return (
+            "🆕 NEW → MONITORING"
+        )
 
     if previous_event:
-        return "🟢 STABLE"
 
-    return "🆕 NEW"
+        return (
+            "🟢 STABLE_ACTIVE"
+        )
+
+    return (
+        "🆕 NEW"
+    )
 
 
 # ============================================================
@@ -1757,7 +2296,9 @@ def operational_decision(
     persistence
 ):
 
-    decision = operational["decision"]
+    decision = (
+        operational["decision"]
+    )
 
     if decision == "تصعيد عاجل":
 
@@ -1816,19 +2357,31 @@ def calculate_national_situation(
 ):
 
     if not clusters:
+
         return {
+
             "score": 0,
+
             "level": "طبيعي",
+
             "emoji": "🟢",
-            "description": "لا توجد مؤشرات تشغيلية مهمة."
+
+            "description":
+                "لا توجد مؤشرات تشغيلية مهمة."
+
         }
 
     priorities = [
+
         c["operational"]["score"]
+
         for c in clusters
+
     ]
 
-    highest = max(priorities)
+    highest = max(
+        priorities
+    )
 
     medium_high = sum(
         1
@@ -1865,13 +2418,20 @@ def calculate_national_situation(
     )
 
     score = round(
-        min(100, max(0, score))
+        min(
+            100,
+            max(
+                0,
+                score
+            )
+        )
     )
 
     if score >= 80:
 
         level = "حرج"
         emoji = "🔴"
+
         description = (
             "الموقف الوطني يستدعي تصعيدًا تشغيليًا."
         )
@@ -1880,6 +2440,7 @@ def calculate_national_situation(
 
         level = "مرتفع"
         emoji = "🟠"
+
         description = (
             "توجد مؤشرات تستدعي رفع مستوى المراقبة."
         )
@@ -1888,6 +2449,7 @@ def calculate_national_situation(
 
         level = "تحت المراقبة"
         emoji = "🟡"
+
         description = (
             "توجد أحداث حرارية تحت المراقبة."
         )
@@ -1896,76 +2458,209 @@ def calculate_national_situation(
 
         level = "طبيعي"
         emoji = "🟢"
+
         description = (
             "الموقف الوطني ضمن المستويات الاعتيادية."
         )
 
     return {
+
         "score": score,
+
         "level": level,
+
         "emoji": emoji,
-        "description": description
+
+        "description":
+            description
+
     }
 
 
 # ============================================================
-# REGION
+# 🇸🇦 IMPROVED REGION CLASSIFICATION
 # ============================================================
 
-def approximate_region(lat, lon):
+def approximate_region(
+    lat,
+    lon
+):
 
-    if lat >= 29:
-        return "الحدود الشمالية / الجوف / تبوك"
+    # --------------------------------------------------------
+    # المنطقة الشرقية
+    # --------------------------------------------------------
 
-    if lat >= 27:
+    if (
+        lon >= 48.0
+        and
+        lat >= 24.0
+    ):
 
-        if lon < 42:
-            return "تبوك / شمال غرب المملكة"
+        return (
+            "المنطقة الشرقية"
+        )
 
-        return "حائل / الحدود الشمالية"
+    # --------------------------------------------------------
+    # الربع الخالي / شرق نجران
+    # --------------------------------------------------------
 
-    if lat >= 24:
+    if (
+        lon >= 47.0
+        and
+        lat < 24.0
+    ):
 
-        if lon < 42:
-            return "المدينة المنورة / شمال غرب المملكة"
+        return (
+            "المنطقة الشرقية / نجران"
+        )
 
-        if lon < 48:
-            return "القصيم / الرياض"
+    # --------------------------------------------------------
+    # شمال المملكة
+    # --------------------------------------------------------
+
+    if lat >= 29.0:
+
+        if lon < 38.0:
+
+            return "تبوك"
+
+        if lon < 42.0:
+
+            return "الجوف / تبوك"
+
+        if lon < 46.0:
+
+            return "الحدود الشمالية"
 
         return "المنطقة الشرقية"
 
-    if lat >= 22:
+    # --------------------------------------------------------
+    # حائل
+    # --------------------------------------------------------
 
-        if lon < 42:
-            return "مكة المكرمة / المدينة المنورة"
+    if (
+        26.0 <= lat < 29.0
+        and
+        40.0 <= lon < 44.0
+    ):
 
-        if lon < 48:
-            return "الرياض / وسط المملكة"
+        return "حائل"
 
-        return "المنطقة الشرقية"
+    # --------------------------------------------------------
+    # القصيم
+    # --------------------------------------------------------
 
-    if lat >= 18:
+    if (
+        24.0 <= lat < 28.0
+        and
+        42.0 <= lon < 46.0
+    ):
 
-        if lon < 44:
-            return "عسير / جازان"
+        return "القصيم"
 
-        if lon < 48:
-            return "نجران"
+    # --------------------------------------------------------
+    # الرياض
+    # --------------------------------------------------------
 
-        return "المنطقة الشرقية"
+    if (
+        21.0 <= lat < 27.0
+        and
+        43.0 <= lon < 48.0
+    ):
 
-    return "جازان / جنوب المملكة"
+        return "الرياض"
+
+    # --------------------------------------------------------
+    # المدينة المنورة
+    # --------------------------------------------------------
+
+    if (
+        23.0 <= lat < 29.0
+        and
+        37.0 <= lon < 42.0
+    ):
+
+        return "المدينة المنورة"
+
+    # --------------------------------------------------------
+    # مكة المكرمة
+    # --------------------------------------------------------
+
+    if (
+        20.0 <= lat < 24.0
+        and
+        38.0 <= lon < 42.0
+    ):
+
+        return "مكة المكرمة"
+
+    # --------------------------------------------------------
+    # عسير
+    # --------------------------------------------------------
+
+    if (
+        17.0 <= lat < 20.0
+        and
+        41.0 <= lon < 44.0
+    ):
+
+        return "عسير"
+
+    # --------------------------------------------------------
+    # جازان
+    # --------------------------------------------------------
+
+    if (
+        lat < 18.5
+        and
+        lon < 43.0
+    ):
+
+        return "جازان"
+
+    # --------------------------------------------------------
+    # نجران
+    # --------------------------------------------------------
+
+    if (
+        17.0 <= lat < 21.0
+        and
+        lon >= 44.0
+    ):
+
+        return "نجران"
+
+    # --------------------------------------------------------
+    # الباحة
+    # --------------------------------------------------------
+
+    if (
+        19.0 <= lat < 21.0
+        and
+        40.0 <= lon < 42.0
+    ):
+
+        return "الباحة"
+
+    # --------------------------------------------------------
+    # fallback
+    # --------------------------------------------------------
+
+    return "المملكة العربية السعودية"
 
 
 # ============================================================
 # GOOGLE MAPS
 # ============================================================
 
-def google_maps(lat, lon):
+def google_maps(
+    lat,
+    lon
+):
 
     return (
         "https://www.google.com/maps"
-        f"?q={lat},{lon}"
+        f"?q={lat:.6f},{lon:.6f}"
     )
 
 
@@ -1973,16 +2668,24 @@ def google_maps(lat, lon):
 # ALERT COOLDOWN
 # ============================================================
 
-def alert_allowed(cid, state):
+def alert_allowed(
+    event_id,
+    state
+):
 
     alerts = state.get(
         "alerts",
         {}
     )
 
-    last_alert_raw = alerts.get(cid)
+    last_alert_raw = (
+        alerts.get(
+            event_id
+        )
+    )
 
     if not last_alert_raw:
+
         return True
 
     try:
@@ -1998,55 +2701,81 @@ def alert_allowed(cid, state):
         return True
 
     elapsed = (
-        now_utc() - last_alert
+        now_utc() -
+        last_alert
     ).total_seconds() / 3600
 
-    if elapsed >= ALERT_COOLDOWN_HOURS:
+    if (
+        elapsed
+        >= ALERT_COOLDOWN_HOURS
+    ):
+
         return True
 
     print(
         f"⏸️ Alert cooldown active: "
-        f"{cid} | {elapsed:.1f}h"
+        f"{event_id} | "
+        f"{elapsed:.1f}h"
     )
 
     return False
 
 
-def mark_alert(cid, state):
+def mark_alert(
+    event_id,
+    state
+):
 
     state.setdefault(
         "alerts",
         {}
     )
 
-    state["alerts"][cid] = (
-        now_utc().isoformat()
-    )
+    state["alerts"][
+        event_id
+    ] = now_utc().isoformat()
 
 
 # ============================================================
 # NEW CLUSTER DECISION
 # ============================================================
 
-def is_significant_new_cluster(cluster):
+def is_significant_new_cluster(
+    cluster
+):
 
-    risk = cluster["risk"]
+    risk = cluster[
+        "risk"
+    ]
 
-    if risk["score"] >= NEW_CLUSTER_MIN_RISK:
+    if (
+        risk["score"]
+        >=
+        NEW_CLUSTER_MIN_RISK
+    ):
+
         return True
 
     if (
-        risk["count"] >= NEW_CLUSTER_MIN_COUNT
+        risk["count"]
+        >=
+        NEW_CLUSTER_MIN_COUNT
         and
-        risk["max_frp"] >= 20
+        risk["max_frp"]
+        >= 20
     ):
+
         return True
 
     if (
-        risk["count"] == 1
+        risk["count"]
+        == 1
         and
-        risk["max_frp"] >= NEW_CLUSTER_STRONG_FRP
+        risk["max_frp"]
+        >=
+        NEW_CLUSTER_STRONG_FRP
     ):
+
         return True
 
     return False
@@ -2063,7 +2792,8 @@ def update_event_record(
     lifecycle,
     operational,
     triggers,
-    first_seen
+    first_seen,
+    previous_event
 ):
 
     events = state.setdefault(
@@ -2076,47 +2806,81 @@ def update_event_record(
         {}
     )
 
-    observations = int(
-        old.get(
-            "observations",
-            0
-        )
-    ) + 1
+    if previous_event:
+
+        observations = int(
+            previous_event.get(
+                "observations",
+                0
+            )
+        ) + 1
+
+    else:
+
+        observations = int(
+            old.get(
+                "observations",
+                0
+            )
+        ) + 1
 
     events[event_id] = {
 
-        "event_id": event_id,
+        "event_id":
+            event_id,
 
-        "cid": cluster_id(cluster),
+        "cid":
+            cluster_id(
+                cluster
+            ),
 
-        "lat": cluster["center"]["lat"],
+        "lat":
+            cluster["center"]["lat"],
 
-        "lon": cluster["center"]["lon"],
+        "lon":
+            cluster["center"]["lon"],
 
-        "first_seen": old.get(
-            "first_seen",
-            first_seen
-        ),
+        "first_seen":
+            old.get(
+                "first_seen",
+                first_seen
+            ),
 
-        "last_seen": now_utc().isoformat(),
+        "last_seen":
+            now_utc().isoformat(),
 
-        "observations": observations,
+        "observations":
+            observations,
 
-        "risk": cluster["risk"]["score"],
+        "risk":
+            cluster["risk"]["score"],
 
-        "verification": cluster["verification"],
+        "verification":
+            cluster["verification"],
 
-        "persistence": cluster["persistence"],
+        "persistence":
+            cluster["persistence"],
 
-        "operational_priority": operational["score"],
+        "operational_priority":
+            operational["score"],
 
-        "operational_level": operational["level"],
+        "operational_level":
+            operational["level"],
 
-        "decision": operational["decision"],
+        "decision":
+            operational["decision"],
 
-        "lifecycle": lifecycle,
+        "lifecycle":
+            lifecycle,
 
-        "triggers": triggers
+        "triggers":
+            triggers,
+
+        "last_lat":
+            cluster["center"]["lat"],
+
+        "last_lon":
+            cluster["center"]["lon"]
 
     }
 
@@ -2146,76 +2910,130 @@ def send_monitoring_report(
     )
 
     operational_events = [
+
         c for c in clusters
+
         if c["operational"]["score"]
         >= OPERATIONAL_EVENT_MIN_PRIORITY
+
     ]
 
     verification_events = [
+
         c for c in clusters
+
         if c["operational"]["score"]
         >= VERIFICATION_PRIORITY
+
     ]
 
     escalations = [
+
         c for c in clusters
+
         if c["operational"]["score"]
         >= ESCALATION_PRIORITY
+
     ]
 
     critical = [
+
         c for c in clusters
+
         if c["operational"]["score"]
         >= CRITICAL_PRIORITY
+
     ]
 
     high = [
+
         c for c in clusters
+
         if (
             c["operational"]["score"]
             >= ESCALATION_PRIORITY
             and
             c["operational"]["score"]
-            < CRITICAL_PRIORITY
+            <
+            CRITICAL_PRIORITY
         )
+
     ]
 
     medium = [
+
         c for c in operational_events
+
         if (
             c["operational"]["score"]
             >= MONITORING_PRIORITY
             and
             c["operational"]["score"]
-            < ESCALATION_PRIORITY
+            <
+            ESCALATION_PRIORITY
         )
+
     ]
 
     low = [
+
         c for c in clusters
+
         if c["operational"]["score"]
-        < MONITORING_PRIORITY
+        <
+        MONITORING_PRIORITY
+
     ]
 
     new_events = [
+
         c for c in clusters
-        if "جديدة" in c.get("trend", "")
+
+        if "جديدة"
+        in c.get(
+            "trend",
+            ""
+        )
+
     ]
 
     rising = [
+
         c for c in clusters
-        if "تصاعد" in c.get("trend", "")
+
+        if "تصاعد"
+        in c.get(
+            "trend",
+            ""
+        )
+
     ]
 
     declining = [
+
         c for c in clusters
-        if "تراجع" in c.get("trend", "")
+
+        if "تراجع"
+        in c.get(
+            "trend",
+            ""
+        )
+
+    ]
+
+    persistent = [
+
+        c for c in clusters
+
+        if c["persistence"]
+        >= 50
+
     ]
 
     message = []
 
     message.append(
-        "🔥 مركز مراقبة حرائق السعودية — V5.9.3"
+        "🔥 مركز مراقبة حرائق السعودية — V5.9.4"
     )
 
     message.append(
@@ -2249,7 +3067,7 @@ def send_monitoring_report(
     )
 
     message.append(
-        f"🔥 بؤر حرارية مرصودة: "
+        f"🔥 البؤر الحرارية: "
         f"{len(clusters)}"
     )
 
@@ -2281,14 +3099,25 @@ def send_monitoring_report(
         f"📉 متراجعة: {len(declining)}"
     )
 
+    message.append(
+        f"⏱️ مستمرة: {len(persistent)}"
+    )
+
     message.append("")
 
     if operational_events:
 
-        highest = operational_events[0]
+        highest = (
+            operational_events[0]
+        )
 
-        op = highest["operational"]
-        risk = highest["risk"]
+        op = highest[
+            "operational"
+        ]
+
+        risk = highest[
+            "risk"
+        ]
 
         message.append(
             "🎯 أعلى أولوية تشغيلية:"
@@ -2301,11 +3130,15 @@ def send_monitoring_report(
         )
 
         message.append(
-            f"{op['decision']}"
+            highest[
+                "decision"
+            ]
         )
 
         message.append(
-            highest["decision_description"]
+            highest[
+                "decision_description"
+            ]
         )
 
         message.append("")
@@ -2356,18 +3189,26 @@ def send_monitoring_report(
         "📌 أبرز الأحداث:"
     )
 
-    top = clusters[:TOP_CLUSTERS]
+    top = clusters[
+        :TOP_CLUSTERS
+    ]
 
     for index, cluster in enumerate(
         top,
         start=1
     ):
 
-        center = cluster["center"]
+        center = cluster[
+            "center"
+        ]
 
-        risk = cluster["risk"]
+        risk = cluster[
+            "risk"
+        ]
 
-        operational = cluster["operational"]
+        operational = cluster[
+            "operational"
+        ]
 
         region = approximate_region(
             center["lat"],
@@ -2379,7 +3220,8 @@ def send_monitoring_report(
         message.append(
             f"{index}) "
             f"{operational['emoji']} "
-            f"أولوية {operational['level']} — "
+            f"أولوية "
+            f"{operational['level']} — "
             f"{operational['score']}/100"
         )
 
@@ -2402,7 +3244,8 @@ def send_monitoring_report(
         )
 
         message.append(
-            f"🗺️ النطاق: {region}"
+            f"🗺️ النطاق: "
+            f"{region}"
         )
 
         message.append(
@@ -2459,7 +3302,9 @@ def send_monitoring_report(
             "🧠 مؤشرات القرار:"
         )
 
-        for trigger in cluster["triggers"][:5]:
+        for trigger in (
+            cluster["triggers"][:5]
+        ):
 
             message.append(
                 f"   • {trigger}"
@@ -2491,11 +3336,13 @@ def send_monitoring_report(
     )
 
     message.append(
-        f"بعد التحليل: {normalized_count}"
+        f"بعد التحليل: "
+        f"{normalized_count}"
     )
 
     message.append(
-        f"خارج حدود المملكة: {outside_saudi}"
+        f"خارج حدود المملكة: "
+        f"{outside_saudi}"
     )
 
     message.append("")
@@ -2513,7 +3360,7 @@ def send_monitoring_report(
     )
 
     message.append(
-        "Saudi Wildfire Intelligence V5.9.3"
+        "Saudi Wildfire Intelligence V5.9.4"
     )
 
     message.append("")
@@ -2577,10 +3424,12 @@ def send_monitoring_report(
 
 def main():
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     print(
-        "🔥 Saudi Wildfire Intelligence V5.9.3"
+        "🔥 Saudi Wildfire Intelligence V5.9.4"
     )
 
     print(
@@ -2608,14 +3457,20 @@ def main():
     )
 
     print(
-        "🔄 Event Lifecycle ENABLED"
+        "🔄 Event Lifecycle 2.0 ENABLED"
     )
 
     print(
         "🧠 Trigger Intelligence ENABLED"
     )
 
-    print("=" * 70)
+    print(
+        "🆔 Persistent Event Matching ENABLED"
+    )
+
+    print(
+        "=" * 70
+    )
 
     state = load_state()
 
@@ -2624,14 +3479,34 @@ def main():
         {}
     )
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # نستخدم الأحداث السابقة أولاً
+    # ثم clusters الحالية
+    # ثم history
+    # --------------------------------------------------------
+
+    previous_events = (
+        state.get(
+            "events",
+            {}
+        )
+    )
+
     previous_clusters = {}
 
     previous_clusters.update(
-        state.get("history", {})
+        state.get(
+            "history",
+            {}
+        )
     )
 
     previous_clusters.update(
-        state.get("clusters", {})
+        state.get(
+            "clusters",
+            {}
+        )
     )
 
     all_rows = []
@@ -2654,12 +3529,17 @@ def main():
             f"   Rows: {len(rows)}"
         )
 
-        all_rows.extend(rows)
+        all_rows.extend(
+            rows
+        )
 
-    raw_count = len(all_rows)
+    raw_count = len(
+        all_rows
+    )
 
     print(
-        f"📊 Total FIRMS rows: {raw_count}"
+        f"📊 Total FIRMS rows: "
+        f"{raw_count}"
     )
 
     # ========================================================
@@ -2699,14 +3579,17 @@ def main():
     # DUPLICATES
     # ========================================================
 
-    events = remove_duplicates(events)
+    events = remove_duplicates(
+        events
+    )
 
     print(
-        f"🔁 After duplicates: {len(events)}"
+        f"🔁 After duplicates: "
+        f"{len(events)}"
     )
 
     # ========================================================
-    # NEW EVENTS
+    # NEW SENSOR EVENTS
     # ========================================================
 
     new_events = []
@@ -2721,14 +3604,20 @@ def main():
         )
 
         if uid in seen:
+
             continue
 
-        seen[uid] = now_utc().isoformat()
+        seen[uid] = (
+            now_utc().isoformat()
+        )
 
-        new_events.append(event)
+        new_events.append(
+            event
+        )
 
     print(
-        f"🆕 New events: {len(new_events)}"
+        f"🆕 New sensor observations: "
+        f"{len(new_events)}"
     )
 
     # ========================================================
@@ -2740,7 +3629,8 @@ def main():
     )
 
     print(
-        f"🔥 Current clusters: {len(clusters)}"
+        f"🔥 Current clusters: "
+        f"{len(clusters)}"
     )
 
     # ========================================================
@@ -2751,30 +3641,54 @@ def main():
 
     current_cluster_state = {}
 
+    used_event_ids = set()
+
     for cluster in clusters:
 
         cid = cluster_id(
             cluster
         )
 
+        # ----------------------------------------------------
+        # PREVIOUS CLUSTER
+        # ----------------------------------------------------
+
         previous = find_previous_cluster(
             cluster,
             previous_clusters
         )
 
-        persistence = calculate_persistence(
-            cluster,
-            previous
+        # ----------------------------------------------------
+        # PERSISTENCE
+        # ----------------------------------------------------
+
+        persistence = (
+            calculate_persistence(
+                cluster,
+                previous
+            )
         )
 
-        cluster["persistence"] = persistence
+        cluster[
+            "persistence"
+        ] = persistence
+
+        # ----------------------------------------------------
+        # RISK
+        # ----------------------------------------------------
 
         risk = calculate_risk(
             cluster,
             persistence
         )
 
-        cluster["risk"] = risk
+        cluster[
+            "risk"
+        ] = risk
+
+        # ----------------------------------------------------
+        # VERIFICATION
+        # ----------------------------------------------------
 
         verification = (
             calculate_verification_score(
@@ -2783,20 +3697,73 @@ def main():
             )
         )
 
-        cluster["verification"] = verification
+        cluster[
+            "verification"
+        ] = verification
+
+        # ----------------------------------------------------
+        # EVENT ID MATCH
+        # ----------------------------------------------------
+
+        event_id, previous_event = (
+            resolve_event_identity(
+                cluster,
+                state
+            )
+        )
+
+        # منع إعادة استخدام نفس الحدث
+        # إذا كان هناك أكثر من cluster قريب
+        if event_id in used_event_ids:
+
+            event_id = (
+                generate_event_id(
+                    cluster,
+                    state.get(
+                        "events",
+                        {}
+                    )
+                )
+            )
+
+            previous_event = None
+
+        used_event_ids.add(
+            event_id
+        )
+
+        cluster[
+            "event_id"
+        ] = event_id
+
+        # ----------------------------------------------------
+        # TREND
+        # ----------------------------------------------------
+
+        trend_previous = (
+            previous_event
+            if previous_event
+            else previous
+        )
 
         trend, trend_description = (
             calculate_trend(
                 cluster,
-                previous
+                trend_previous
             )
         )
 
-        cluster["trend"] = trend
+        cluster[
+            "trend"
+        ] = trend
 
-        cluster["trend_description"] = (
-            trend_description
-        )
+        cluster[
+            "trend_description"
+        ] = trend_description
+
+        # ----------------------------------------------------
+        # CLASSIFICATION
+        # ----------------------------------------------------
 
         classification, explanation = (
             classify_cluster(
@@ -2806,13 +3773,13 @@ def main():
             )
         )
 
-        cluster["classification"] = (
-            classification
-        )
+        cluster[
+            "classification"
+        ] = classification
 
-        cluster["explanation"] = (
-            explanation
-        )
+        cluster[
+            "explanation"
+        ] = explanation
 
         # ----------------------------------------------------
         # OPERATIONAL PRIORITY
@@ -2824,13 +3791,13 @@ def main():
                 verification,
                 persistence,
                 trend,
-                previous
+                trend_previous
             )
         )
 
-        cluster["operational"] = (
-            operational
-        )
+        cluster[
+            "operational"
+        ] = operational
 
         # ----------------------------------------------------
         # TRIGGERS
@@ -2838,14 +3805,16 @@ def main():
 
         triggers = calculate_triggers(
             cluster,
-            previous,
+            trend_previous,
             risk,
             verification,
             persistence,
             trend
         )
 
-        cluster["triggers"] = triggers
+        cluster[
+            "triggers"
+        ] = triggers
 
         # ----------------------------------------------------
         # DECISION
@@ -2859,77 +3828,72 @@ def main():
             )
         )
 
-        cluster["decision"] = decision
+        cluster[
+            "decision"
+        ] = decision
 
-        cluster["decision_description"] = (
-            decision_description
-        )
-
-        # ----------------------------------------------------
-        # EVENT ID
-        # ----------------------------------------------------
-
-        old_event_id = None
-
-        for event_id, event in state.get(
-            "events",
-            {}
-        ).items():
-
-            if event.get("cid") == cid:
-
-                old_event_id = event_id
-                break
-
-        if old_event_id:
-
-            event_id = old_event_id
-
-        else:
-
-            event_id = generate_event_id(
-                cluster,
-                state.get("events", {})
-            )
-
-        cluster["event_id"] = event_id
+        cluster[
+            "decision_description"
+        ] = decision_description
 
         # ----------------------------------------------------
         # OBSERVATIONS
         # ----------------------------------------------------
 
-        old_event = state.get(
-            "events",
-            {}
-        ).get(
-            event_id
-        )
-
-        if old_event:
+        if previous_event:
 
             observations = int(
-                old_event.get(
+                previous_event.get(
                     "observations",
                     0
                 )
             ) + 1
 
-            first_seen = old_event.get(
-                "first_seen",
-                now_utc().isoformat()
+            first_seen = (
+                previous_event.get(
+                    "first_seen",
+                    now_utc().isoformat()
+                )
             )
 
         else:
 
-            observations = 1
-
-            first_seen = (
-                now_utc().isoformat()
+            old_event = (
+                state.get(
+                    "events",
+                    {}
+                ).get(
+                    event_id
+                )
             )
 
-        cluster["observations"] = (
-            observations
-        )
+            if old_event:
+
+                observations = int(
+                    old_event.get(
+                        "observations",
+                        0
+                    )
+                ) + 1
+
+                first_seen = (
+                    old_event.get(
+                        "first_seen",
+                        now_utc().isoformat()
+                    )
+                )
+
+            else:
+
+                observations = 1
+
+                first_seen = (
+                    now_utc().isoformat()
+                )
+
+        cluster[
+            "observations"
+        ] = observations
 
         # ----------------------------------------------------
         # LIFECYCLE
@@ -2937,60 +3901,78 @@ def main():
 
         lifecycle = determine_lifecycle(
             operational,
-            old_event,
-            previous
+            previous_event,
+            trend_previous
         )
 
-        cluster["lifecycle"] = lifecycle
+        cluster[
+            "lifecycle"
+        ] = lifecycle
 
         # ----------------------------------------------------
         # CURRENT STATE
         # ----------------------------------------------------
 
-        current_cluster_state[cid] = {
+        current_cluster_state[
+            cid
+        ] = {
 
-            "event_id": event_id,
+            "event_id":
+                event_id,
 
-            "risk": risk["score"],
+            "risk":
+                risk["score"],
 
-            "verification": verification,
+            "verification":
+                verification,
 
-            "persistence": persistence,
+            "persistence":
+                persistence,
 
-            "lat": cluster["center"]["lat"],
+            "lat":
+                cluster[
+                    "center"
+                ]["lat"],
 
-            "lon": cluster["center"]["lon"],
+            "lon":
+                cluster[
+                    "center"
+                ]["lon"],
 
-            "count": risk["count"],
+            "count":
+                risk["count"],
 
-            "max_frp": risk["max_frp"],
+            "max_frp":
+                risk["max_frp"],
 
-            "total_frp": risk["total_frp"],
+            "total_frp":
+                risk["total_frp"],
 
-            "observations": observations,
+            "observations":
+                observations,
 
-            "operational_priority": (
-                operational["score"]
-            ),
+            "historical_observations":
+                observations,
 
-            "operational_level": (
-                operational["level"]
-            ),
+            "operational_priority":
+                operational["score"],
 
-            "decision": (
-                operational["decision"]
-            ),
+            "operational_level":
+                operational["level"],
 
-            "lifecycle": lifecycle,
+            "decision":
+                operational["decision"],
 
-            "last_seen": (
+            "lifecycle":
+                lifecycle,
+
+            "last_seen":
                 now_utc().isoformat()
-            )
 
         }
 
         # ----------------------------------------------------
-        # UPDATE EVENT MEMORY
+        # EVENT MEMORY
         # ----------------------------------------------------
 
         update_event_record(
@@ -3000,7 +3982,8 @@ def main():
             lifecycle,
             operational,
             triggers,
-            first_seen
+            first_seen,
+            previous_event
         )
 
         processed_clusters.append(
@@ -3020,8 +4003,10 @@ def main():
     # NATIONAL SITUATION
     # ========================================================
 
-    national = calculate_national_situation(
-        processed_clusters
+    national = (
+        calculate_national_situation(
+            processed_clusters
+        )
     )
 
     print(
@@ -3038,21 +4023,25 @@ def main():
 
     for cluster in processed_clusters:
 
-        cid = cluster_id(
-            cluster
+        event_id = (
+            cluster["event_id"]
         )
 
-        operational = cluster[
-            "operational"
-        ]
+        operational = (
+            cluster["operational"]
+        )
 
-        risk = cluster[
-            "risk"
-        ]
+        risk = (
+            cluster["risk"]
+        )
 
-        previous = find_previous_cluster(
-            cluster,
-            previous_clusters
+        previous_event = (
+            state.get(
+                "events",
+                {}
+            ).get(
+                event_id
+            )
         )
 
         should_alert = False
@@ -3061,7 +4050,14 @@ def main():
         # NEW SIGNIFICANT EVENT
         # ----------------------------------------------------
 
-        if previous is None:
+        if (
+            cluster["lifecycle"]
+            in (
+                "🆕 NEW",
+                "🆕 NEW → MONITORING",
+                "🆕 NEW → VERIFICATION"
+            )
+        ):
 
             if (
                 ALERT_NEW_CLUSTER
@@ -3071,7 +4067,7 @@ def main():
                 )
                 and
                 alert_allowed(
-                    cid,
+                    event_id,
                     state
                 )
             ):
@@ -3080,7 +4076,7 @@ def main():
 
                 print(
                     f"🆕 Significant new event: "
-                    f"{cluster['event_id']}"
+                    f"{event_id}"
                 )
 
         # ----------------------------------------------------
@@ -3093,7 +4089,7 @@ def main():
         ):
 
             if alert_allowed(
-                cid,
+                event_id,
                 state
             ):
 
@@ -3101,7 +4097,7 @@ def main():
 
                 print(
                     f"🚨 Operational escalation: "
-                    f"{cluster['event_id']}"
+                    f"{event_id}"
                 )
 
         # ----------------------------------------------------
@@ -3109,13 +4105,15 @@ def main():
         # ----------------------------------------------------
 
         if (
-            "تصاعد" in cluster["trend"]
+            "تصاعد"
+            in cluster["trend"]
             and
-            risk["score"] >= 50
+            risk["score"]
+            >= 50
         ):
 
             if alert_allowed(
-                cid,
+                event_id,
                 state
             ):
 
@@ -3123,7 +4121,7 @@ def main():
 
                 print(
                     f"📈 Trend escalation: "
-                    f"{cluster['event_id']}"
+                    f"{event_id}"
                 )
 
         if should_alert:
@@ -3133,7 +4131,7 @@ def main():
             )
 
             mark_alert(
-                cid,
+                event_id,
                 state
             )
 
@@ -3151,28 +4149,29 @@ def main():
         {}
     )
 
-    for cid, current in current_cluster_state.items():
+    for cid, current in (
+        current_cluster_state.items()
+    ):
 
-        old = history.get(cid)
+        old = history.get(
+            cid
+        )
 
         if old:
 
             observations = int(
                 old.get(
-                    "observations",
-                    0
+                    "historical_observations",
+                    old.get(
+                        "observations",
+                        0
+                    )
                 )
             ) + 1
 
             current[
                 "historical_observations"
             ] = observations
-
-        else:
-
-            current[
-                "historical_observations"
-            ] = 1
 
         history[cid] = current
 
@@ -3206,7 +4205,9 @@ def main():
     # FINAL LOG
     # ========================================================
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     print(
         "🏛️ Government Monitoring Center completed"
@@ -3225,7 +4226,11 @@ def main():
     )
 
     print(
-        "🔄 Event lifecycle completed"
+        "🔄 Event lifecycle 2.0 completed"
+    )
+
+    print(
+        "🆔 Persistent event matching completed"
     )
 
     print(
@@ -3249,14 +4254,16 @@ def main():
     )
 
     print(
-        "🤖 Saudi Wildfire Intelligence V5.9.3"
+        "🤖 Saudi Wildfire Intelligence V5.9.4"
     )
 
     print(
-        "✅ V5.9.3 completed successfully"
+        "✅ V5.9.4 completed successfully"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
 
 # ============================================================
@@ -3264,4 +4271,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
