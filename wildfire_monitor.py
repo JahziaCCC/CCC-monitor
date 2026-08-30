@@ -7,12 +7,12 @@ import requests
 
 
 # ============================================================
-# 🔥 Saudi Wildfire Intelligence V5.9
-# Advanced Temporal + Geographic Verification Engine
+# 🔥 Saudi Wildfire Intelligence V5.9.1
+# Government Monitoring Center Core
 #
 # NASA FIRMS + VIIRS
 #
-# V5.9:
+# V5.9.1:
 # - Saudi Arabia Polygon Validation
 # - BBOX pre-filter
 # - Natural fire filtering
@@ -28,12 +28,16 @@ import requests
 # - Trend Analysis
 # - Smart Classification
 # - Smart Recommendation
+# - Operational Priority Score
+# - Operational Decision Engine
+# - Event Status
 # - Alert escalation logic
 # - Alert cooldown
 # - Duplicate alert protection
 # - New cluster intelligence
 # - Strong single-point detection
 # - Arabic executive Telegram alerts
+# - Government Monitoring Center Executive Summary
 # ============================================================
 
 
@@ -59,7 +63,7 @@ KSA_TZ = datetime.timezone(
 # STATE FILE
 # ============================================================
 
-STATE_FILE = "wildfire_state_v59.json"
+STATE_FILE = "wildfire_state_v591.json"
 
 
 # ============================================================
@@ -111,12 +115,12 @@ CLUSTER_MEMORY_HOURS = 72
 
 ALERT_NEW_CLUSTER = True
 
-# منع إرسال نفس التنبيه بشكل متكرر
 ALERT_COOLDOWN_HOURS = 6
 
-# البؤرة الجديدة يجب أن تحقق أحد هذه الشروط
 NEW_CLUSTER_MIN_RISK = 50
+
 NEW_CLUSTER_MIN_COUNT = 2
+
 NEW_CLUSTER_STRONG_FRP = 40
 
 
@@ -137,9 +141,26 @@ PERSISTENCE_COUNT_WEIGHT = 0.45
 # HISTORICAL MEMORY
 # ============================================================
 
-HISTORY_MEMORY_HOURS = 168  # 7 أيام
+HISTORY_MEMORY_HOURS = 168
 
 MAX_HISTORY_CLUSTERS = 500
+
+
+# ============================================================
+# OPERATIONAL INTELLIGENCE SETTINGS
+# ============================================================
+
+# الحد الأدنى لإظهار الحدث كأولوية تشغيلية
+OPERATIONAL_PRIORITY_THRESHOLD = 45
+
+# الحد الأدنى لإرسال تنبيه تشغيلي لحدث جديد
+OPERATIONAL_NEW_EVENT_THRESHOLD = 55
+
+# الحد الذي يعتبر عنده الحدث عالي الأولوية
+HIGH_OPERATIONAL_PRIORITY = 70
+
+# الحد الذي يعتبر عنده الحدث حرجًا تشغيليًا
+CRITICAL_OPERATIONAL_PRIORITY = 85
 
 
 # ============================================================
@@ -148,7 +169,7 @@ MAX_HISTORY_CLUSTERS = 500
 
 HTTP_HEADERS = {
     "User-Agent":
-        "Saudi-Wildfire-Intelligence-V5.9",
+        "Saudi-Wildfire-Intelligence-V5.9.1",
 
     "Accept":
         "text/csv,*/*",
@@ -485,7 +506,6 @@ def save_state(state):
             pass
 
 
-    # Limit memory
     if len(cleaned_history) > MAX_HISTORY_CLUSTERS:
 
         ordered = sorted(
@@ -740,10 +760,7 @@ def get_firms_rows(source):
 
 
             last_error = (
-
-                f"HTTP "
-                f"{response.status_code}"
-
+                f"HTTP {response.status_code}"
             )
 
 
@@ -779,10 +796,8 @@ def point_in_polygon(
 
     inside = False
 
-
     x = lon
     y = lat
-
 
     j = len(polygon) - 1
 
@@ -803,7 +818,6 @@ def point_in_polygon(
             )
 
             !=
-
             (
                 yj > y
             )
@@ -908,13 +922,9 @@ def parse_acquisition_datetime(
 
 
         if (
-
             hour > 23
-
             or
-
             minute > 59
-
         ):
 
             return None
@@ -1142,20 +1152,14 @@ def normalize_rows(rows):
 
     events = []
 
-
     current_time = now_utc()
 
 
     outside_bbox = 0
-
     outside_saudi = 0
-
     invalid_coordinates = 0
-
     old_events = 0
-
     low_frp = 0
-
     non_natural = 0
 
 
@@ -2075,11 +2079,9 @@ def classify_cluster(
         "score"
     ]
 
-
     count = risk[
         "count"
     ]
-
 
     max_frp = risk[
         "max_frp"
@@ -2364,7 +2366,9 @@ def calculate_trend(
 
             "🆕 جديدة",
 
-            "بؤرة جديدة"
+            "بؤرة جديدة",
+
+            "NEW"
 
         )
 
@@ -2402,7 +2406,9 @@ def calculate_trend(
             "📈 تصاعد",
 
             f"ارتفاع مستوى الخطورة بمقدار "
-            f"{difference} نقطة"
+            f"{difference} نقطة",
+
+            "ESCALATING"
 
         )
 
@@ -2414,7 +2420,9 @@ def calculate_trend(
             "📉 تراجع",
 
             f"انخفاض مستوى الخطورة بمقدار "
-            f"{abs(difference)} نقطة"
+            f"{abs(difference)} نقطة",
+
+            "DECLINING"
 
         )
 
@@ -2423,7 +2431,308 @@ def calculate_trend(
 
         "➡️ مستقر",
 
-        "مستوى الخطورة مستقر نسبيًا"
+        "مستوى الخطورة مستقر نسبيًا",
+
+        "STABLE"
+
+    )
+
+
+# ============================================================
+# EVENT STATUS
+# ============================================================
+
+def determine_event_status(
+    previous,
+    trend_code,
+    risk
+):
+
+    if previous is None:
+
+        return (
+            "🆕 جديد",
+            "NEW"
+        )
+
+
+    if trend_code == "ESCALATING":
+
+        return (
+            "📈 متصاعد",
+            "ESCALATING"
+        )
+
+
+    if trend_code == "DECLINING":
+
+        return (
+            "📉 متراجع",
+            "DECLINING"
+        )
+
+
+    if risk["score"] >= 60:
+
+        return (
+            "🔥 نشط",
+            "ACTIVE"
+        )
+
+
+    return (
+        "➡️ مستقر",
+        "STABLE"
+    )
+
+
+# ============================================================
+# OPERATIONAL PRIORITY
+# ============================================================
+
+def calculate_operational_priority(
+    risk,
+    verification,
+    persistence,
+    trend_code,
+    event_status
+):
+
+    risk_score = risk[
+        "score"
+    ]
+
+    count = risk[
+        "count"
+    ]
+
+    max_frp = risk[
+        "max_frp"
+    ]
+
+
+    # --------------------------------------------------------
+    # BASE
+    # --------------------------------------------------------
+
+    priority = (
+
+        risk_score * 0.40
+
+        +
+
+        verification * 0.25
+
+        +
+
+        persistence * 0.15
+
+    )
+
+
+    # --------------------------------------------------------
+    # MULTI-POINT BONUS
+    # --------------------------------------------------------
+
+    if count >= 5:
+
+        priority += 8
+
+    elif count >= 3:
+
+        priority += 5
+
+    elif count >= 2:
+
+        priority += 2
+
+
+    # --------------------------------------------------------
+    # STRONG FRP BONUS
+    # --------------------------------------------------------
+
+    if max_frp >= 100:
+
+        priority += 8
+
+    elif max_frp >= 70:
+
+        priority += 6
+
+    elif max_frp >= 40:
+
+        priority += 4
+
+
+    # --------------------------------------------------------
+    # TREND BONUS
+    # --------------------------------------------------------
+
+    if trend_code == "ESCALATING":
+
+        priority += 10
+
+
+    elif trend_code == "NEW":
+
+        priority += 4
+
+
+    elif trend_code == "DECLINING":
+
+        priority -= 5
+
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    if event_status == "🆕 جديد":
+
+        priority += 2
+
+
+    priority = round(
+
+        min(
+            100,
+            max(
+                0,
+                priority
+            )
+        )
+
+    )
+
+
+    # --------------------------------------------------------
+    # OPERATIONAL LEVEL
+    # --------------------------------------------------------
+
+    if priority >= CRITICAL_OPERATIONAL_PRIORITY:
+
+        level = "حرج"
+
+        emoji = "🔴"
+
+    elif priority >= HIGH_OPERATIONAL_PRIORITY:
+
+        level = "عالي"
+
+        emoji = "🟠"
+
+    elif priority >= OPERATIONAL_PRIORITY_THRESHOLD:
+
+        level = "متوسط"
+
+        emoji = "🟡"
+
+    else:
+
+        level = "منخفض"
+
+        emoji = "🟢"
+
+
+    return {
+
+        "score":
+            priority,
+
+        "level":
+            level,
+
+        "emoji":
+            emoji
+
+    }
+
+
+# ============================================================
+# OPERATIONAL DECISION
+# ============================================================
+
+def operational_decision(
+    operational,
+    risk,
+    verification,
+    persistence,
+    trend_code
+):
+
+    priority = operational[
+        "score"
+    ]
+
+
+    if priority >= CRITICAL_OPERATIONAL_PRIORITY:
+
+        return (
+
+            "🚨 متابعة عاجلة",
+
+            "رفع أولوية الحدث والتحقق الفوري من استمراره"
+
+        )
+
+
+    if priority >= HIGH_OPERATIONAL_PRIORITY:
+
+        return (
+
+            "⚠️ متابعة مكثفة",
+
+            "متابعة الحدث والتحقق من تطوره وموقعه"
+
+        )
+
+
+    if (
+
+        priority >= OPERATIONAL_PRIORITY_THRESHOLD
+
+        and
+
+        verification >= 60
+
+    ):
+
+        if trend_code == "ESCALATING":
+
+            return (
+
+                "⚠️ متابعة نشطة",
+
+                "النشاط يتصاعد ويستحق متابعة تشغيلية"
+
+            )
+
+
+        return (
+
+            "👁️ تحت المراقبة",
+
+            "إبقاء الحدث ضمن قائمة المتابعة"
+
+        )
+
+
+    if risk["score"] >= 50:
+
+        return (
+
+            "👁️ مراقبة",
+
+            "مراقبة الحدث دون تصعيد فوري"
+
+        )
+
+
+    return (
+
+        "🟢 روتينية",
+
+        "لا توجد حاجة لتصعيد تشغيلي حاليًا"
 
     )
 
@@ -2436,29 +2745,36 @@ def recommendation(
     risk,
     verification,
     persistence,
-    trend
+    trend,
+    operational
 ):
+
+    priority = operational[
+        "score"
+    ]
 
     score = risk[
         "score"
     ]
 
 
-    if (
-
-        score >= 80
-
-        and
-
-        verification >= 75
-
-    ):
+    if priority >= CRITICAL_OPERATIONAL_PRIORITY:
 
         return (
 
             "🚨 التوصية: متابعة عاجلة "
-            "والتحقق من البؤرة ميدانيًا "
+            "والتحقق من الحدث ميدانيًا "
             "أو عبر مصدر مرئي إضافي."
+
+        )
+
+
+    if priority >= HIGH_OPERATIONAL_PRIORITY:
+
+        return (
+
+            "⚠️ التوصية: متابعة مكثفة "
+            "ومراجعة تطور النشاط والتحقق من استمراره."
 
         )
 
@@ -2746,6 +3062,135 @@ def is_significant_new_cluster(
 
 
 # ============================================================
+# EXECUTIVE SUMMARY
+# ============================================================
+
+def build_executive_summary(
+    clusters
+):
+
+    total = len(
+        clusters
+    )
+
+
+    critical = 0
+    high = 0
+    medium = 0
+    low = 0
+
+
+    new_events = 0
+    escalating = 0
+    declining = 0
+
+
+    for cluster in clusters:
+
+        operational = cluster.get(
+            "operational",
+            {}
+        )
+
+
+        level = operational.get(
+            "level",
+            "منخفض"
+        )
+
+
+        if level == "حرج":
+
+            critical += 1
+
+        elif level == "عالي":
+
+            high += 1
+
+        elif level == "متوسط":
+
+            medium += 1
+
+        else:
+
+            low += 1
+
+
+        trend_code = cluster.get(
+            "trend_code",
+            "STABLE"
+        )
+
+
+        if trend_code == "NEW":
+
+            new_events += 1
+
+
+        elif trend_code == "ESCALATING":
+
+            escalating += 1
+
+
+        elif trend_code == "DECLINING":
+
+            declining += 1
+
+
+    if critical > 0:
+
+        overall = "🔴 حالة تستدعي تدخلًا عاجلًا"
+
+    elif high > 0:
+
+        overall = "🟠 حالة تستدعي متابعة مكثفة"
+
+    elif medium > 0:
+
+        overall = "🟡 حالة تحت المراقبة"
+
+    elif total > 0:
+
+        overall = "🟢 نشاط منخفض الأولوية"
+
+    else:
+
+        overall = "🟢 لا توجد أحداث ذات أولوية"
+
+
+    return {
+
+        "total":
+            total,
+
+        "critical":
+            critical,
+
+        "high":
+            high,
+
+        "medium":
+            medium,
+
+        "low":
+            low,
+
+        "new":
+            new_events,
+
+        "escalating":
+            escalating,
+
+        "declining":
+            declining,
+
+        "overall":
+            overall
+
+    }
+
+
+# ============================================================
 # NO FIRE REPORT
 # ============================================================
 
@@ -2757,11 +3202,11 @@ def send_no_fire_report(
 
     message = f"""
 
-🟢 رصد حرائق السعودية — V5.9 AI
+🟢 مركز مراقبة حرائق السعودية — V5.9.1
 
 🕒 {now_ksa()}
 
-✅ لا توجد بؤر تستدعي التنبيه العاجل حاليًا.
+✅ لا توجد أحداث تستدعي التنبيه التشغيلي حاليًا.
 
 📊 بيانات FIRMS المستلمة:
 {raw_count}
@@ -2775,16 +3220,13 @@ def send_no_fire_report(
 🛰️ المصدر:
 NASA FIRMS / VIIRS
 
-🤖 محرك التحليل:
-V5.9 Advanced Temporal & Geographic Verification Engine
+🤖 المحرك:
+Saudi Wildfire Intelligence V5.9.1
 
-🇸🇦 التحقق الجغرافي:
-Saudi Arabia Boundary Polygon
+🏛️ الوضع التشغيلي:
+لا توجد أولوية تستدعي التصعيد
 
-⏱️ التحليل الزمني:
-Historical Persistence + Trend Analysis
-
-⚠️ المخرجات تمثل بؤرًا حرارية وليست تأكيدًا ميدانيًا للحريق.
+⚠️ المخرجات تمثل بؤرًا حرارية وقد تتطلب تحققًا ميدانيًا قبل اعتبارها حريقًا مؤكدًا.
 
 الحالة:
 النظام يعمل بشكل طبيعي
@@ -2813,6 +3255,14 @@ def send_fire_report(
         clusters,
 
         key=lambda c: (
+
+            c.get(
+                "operational",
+                {}
+            ).get(
+                "score",
+                0
+            ),
 
             c["risk"]["score"],
 
@@ -2854,6 +3304,11 @@ def send_fire_report(
     ]
 
 
+    highest_operational = highest[
+        "operational"
+    ]
+
+
     highest_lat = highest[
         "center"
     ][
@@ -2866,6 +3321,11 @@ def send_fire_report(
     ][
         "lon"
     ]
+
+
+    executive = build_executive_summary(
+        clusters
+    )
 
 
     classification, explanation = (
@@ -2881,11 +3341,31 @@ def send_fire_report(
     )
 
 
+    decision, decision_description = (
+        operational_decision(
+
+            highest_operational,
+
+            highest_risk,
+
+            highest_verification,
+
+            highest_persistence,
+
+            highest.get(
+                "trend_code",
+                "STABLE"
+            )
+
+        )
+    )
+
+
     message = []
 
 
     message.append(
-        "🔥 تنبيه حرائق السعودية — V5.9 AI"
+        "🔥 مركز مراقبة حرائق السعودية — V5.9.1"
     )
 
 
@@ -2898,8 +3378,21 @@ def send_fire_report(
 
 
     message.append(
+        "🏛️ الحالة التشغيلية:"
+    )
 
-        f"🚨 البؤر التي تستدعي المتابعة: "
+
+    message.append(
+        executive["overall"]
+    )
+
+
+    message.append("")
+
+
+    message.append(
+
+        f"🚨 أحداث تستدعي المتابعة: "
         f"{len(clusters)}"
 
     )
@@ -2907,17 +3400,47 @@ def send_fire_report(
 
     message.append(
 
-        f"📊 النقاط الحرارية المحللة: "
-        f"{normalized_count}"
+        f"🔴 حرجة: {executive['critical']} | "
+        f"🟠 عالية: {executive['high']} | "
+        f"🟡 متوسطة: {executive['medium']} | "
+        f"🟢 منخفضة: {executive['low']}"
 
     )
 
 
     message.append(
 
-        f"🇸🇦 النقاط المستبعدة خارج حدود المملكة: "
-        f"{outside_saudi}"
+        f"🆕 جديدة: {executive['new']} | "
+        f"📈 متصاعدة: {executive['escalating']} | "
+        f"📉 متراجعة: {executive['declining']}"
 
+    )
+
+
+    message.append("")
+
+
+    message.append(
+        "🎯 أعلى أولوية تشغيلية:"
+    )
+
+
+    message.append(
+
+        f"{highest_operational['emoji']} "
+        f"{highest_operational['level']} — "
+        f"{highest_operational['score']}/100"
+
+    )
+
+
+    message.append(
+        decision
+    )
+
+
+    message.append(
+        decision_description
     )
 
 
@@ -2981,7 +3504,7 @@ def send_fire_report(
 
 
     message.append(
-        "📌 أبرز البؤر:"
+        "📌 أبرز الأحداث:"
     )
 
 
@@ -3010,6 +3533,11 @@ def send_fire_report(
 
         persistence = cluster[
             "persistence"
+        ]
+
+
+        operational = cluster[
+            "operational"
         ]
 
 
@@ -3063,6 +3591,15 @@ def send_fire_report(
         )
 
 
+        status = cluster.get(
+
+            "event_status",
+
+            "➡️ مستقر"
+
+        )
+
+
         rec = recommendation(
 
             risk,
@@ -3071,8 +3608,30 @@ def send_fire_report(
 
             persistence,
 
-            trend_text
+            trend_text,
 
+            operational
+
+        )
+
+
+        decision, decision_description = (
+            operational_decision(
+
+                operational,
+
+                risk,
+
+                verification,
+
+                persistence,
+
+                cluster.get(
+                    "trend_code",
+                    "STABLE"
+                )
+
+            )
         )
 
 
@@ -3082,6 +3641,16 @@ def send_fire_report(
         message.append(
 
             f"{index}) "
+            f"{operational['emoji']} "
+            f"أولوية {operational['level']} — "
+            f"{operational['score']}/100"
+
+        )
+
+
+        message.append(
+
+            f"🚨 الخطورة: "
             f"{risk['emoji']} "
             f"{risk['level']} — "
             f"{risk['score']}/100"
@@ -3156,14 +3725,14 @@ def send_fire_report(
         message.append(
 
             f"🔄 الحالة: "
-            f"{trend_description}"
+            f"{status}"
 
         )
 
 
         message.append(
 
-            f"🧠 درجة التحقق: "
+            f"🧠 التحقق: "
             f"{verification}/100"
 
         )
@@ -3173,6 +3742,21 @@ def send_fire_report(
 
             f"⏱️ الاستمرارية: "
             f"{persistence}/100"
+
+        )
+
+
+        message.append(
+
+            f"🏛️ القرار: "
+            f"{decision}"
+
+        )
+
+
+        message.append(
+
+            f"📝 {decision_description}"
 
         )
 
@@ -3194,7 +3778,7 @@ def send_fire_report(
 
 
     message.append(
-        "📍 موقع أعلى بؤرة:"
+        "📍 موقع أعلى أولوية:"
     )
 
 
@@ -3207,6 +3791,23 @@ def send_fire_report(
             highest_lon
 
         )
+
+    )
+
+
+    message.append("")
+
+
+    message.append(
+        "📊 بيانات الرصد:"
+    )
+
+
+    message.append(
+
+        f"FIRMS: {raw_count} | "
+        f"بعد التحليل: {normalized_count} | "
+        f"خارج حدود المملكة: {outside_saudi}"
 
     )
 
@@ -3230,7 +3831,7 @@ def send_fire_report(
 
 
     message.append(
-        "V5.9 Advanced Temporal & Geographic Verification Engine"
+        "Saudi Wildfire Intelligence V5.9.1"
     )
 
 
@@ -3349,7 +3950,7 @@ def main():
 
 
     print(
-        "🔥 Saudi Wildfire Intelligence V5.9"
+        "🔥 Saudi Wildfire Intelligence V5.9.1"
     )
 
 
@@ -3370,6 +3971,16 @@ def main():
 
     print(
         "🧠 Historical Memory ENABLED"
+    )
+
+
+    print(
+        "🎯 Operational Intelligence ENABLED"
+    )
+
+
+    print(
+        "🏛️ Government Monitoring Center Mode ENABLED"
     )
 
 
@@ -3398,8 +4009,7 @@ def main():
 
 
     # ========================================================
-    # IMPORTANT:
-    # نستخدم التاريخ السابق + الحالة الحالية
+    # PREVIOUS CLUSTERS
     # ========================================================
 
     previous_clusters = {}
@@ -3655,14 +4265,17 @@ def main():
         # TREND
         # ----------------------------------------------------
 
-        trend, trend_description = (
-            calculate_trend(
+        (
+            trend,
+            trend_description,
+            trend_code
 
-                cluster,
+        ) = calculate_trend(
 
-                previous
+            cluster,
 
-            )
+            previous
+
         )
 
 
@@ -3674,6 +4287,64 @@ def main():
         cluster[
             "trend_description"
         ] = trend_description
+
+
+        cluster[
+            "trend_code"
+        ] = trend_code
+
+
+        # ----------------------------------------------------
+        # EVENT STATUS
+        # ----------------------------------------------------
+
+        (
+            event_status,
+            event_status_code
+
+        ) = determine_event_status(
+
+            previous,
+
+            trend_code,
+
+            risk
+
+        )
+
+
+        cluster[
+            "event_status"
+        ] = event_status
+
+
+        cluster[
+            "event_status_code"
+        ] = event_status_code
+
+
+        # ----------------------------------------------------
+        # OPERATIONAL PRIORITY
+        # ----------------------------------------------------
+
+        operational = calculate_operational_priority(
+
+            risk,
+
+            verification,
+
+            persistence,
+
+            trend_code,
+
+            event_status
+
+        )
+
+
+        cluster[
+            "operational"
+        ] = operational
 
 
         # ----------------------------------------------------
@@ -3723,6 +4394,12 @@ def main():
             "persistence":
                 persistence,
 
+            "operational_priority":
+                operational["score"],
+
+            "operational_level":
+                operational["level"],
+
             "lat":
                 cluster[
                     "center"
@@ -3746,6 +4423,18 @@ def main():
             "total_frp":
                 risk["total_frp"],
 
+            "trend":
+                trend,
+
+            "trend_code":
+                trend_code,
+
+            "event_status":
+                event_status,
+
+            "event_status_code":
+                event_status_code,
+
             "observations":
                 observations,
 
@@ -3761,7 +4450,9 @@ def main():
             f"Risk {risk['score']} | "
             f"Verify {verification} | "
             f"Persistence {persistence} | "
-            f"{trend}"
+            f"Operational {operational['score']} | "
+            f"{trend} | "
+            f"{event_status}"
 
         )
 
@@ -3774,6 +4465,11 @@ def main():
 
             risk["score"]
             < ALERT_THRESHOLD
+
+            and
+
+            operational["score"]
+            < OPERATIONAL_PRIORITY_THRESHOLD
 
             and
 
@@ -3794,9 +4490,10 @@ def main():
 
             print(
 
-                f"🟢 Low cluster ignored: "
+                f"🟢 Low operational cluster ignored: "
                 f"{cid} "
-                f"{risk['score']}/100"
+                f"Risk={risk['score']} "
+                f"Operational={operational['score']}"
 
             )
 
@@ -3816,14 +4513,36 @@ def main():
 
         if previous is None:
 
+            significant_new = (
+                is_significant_new_cluster(
+                    cluster
+                )
+            )
+
+
+            operational_new = (
+
+                operational["score"]
+                >=
+                OPERATIONAL_NEW_EVENT_THRESHOLD
+
+            )
+
+
             if (
 
                 ALERT_NEW_CLUSTER
 
                 and
 
-                is_significant_new_cluster(
-                    cluster
+                (
+
+                    significant_new
+
+                    or
+
+                    operational_new
+
                 )
 
                 and
@@ -3840,7 +4559,7 @@ def main():
 
                 print(
 
-                    f"🆕 Significant new alert cluster: "
+                    f"🆕 Significant new operational event: "
                     f"{cid}"
 
                 )
@@ -3872,6 +4591,19 @@ def main():
             )
 
 
+            old_operational = float(
+
+                previous.get(
+                    "operational_priority",
+                    previous.get(
+                        "risk",
+                        0
+                    )
+                )
+
+            )
+
+
             score_difference = (
 
                 risk["score"]
@@ -3890,14 +4622,122 @@ def main():
             )
 
 
+            operational_difference = (
+
+                operational["score"]
+                -
+                old_operational
+
+            )
+
+
             # ----------------------------------------------
-            # RISK ESCALATION
+            # HIGH → CRITICAL
             # ----------------------------------------------
 
             if (
 
+                old_score < 80
+
+                and
+
+                risk["score"] >= 80
+
+            ):
+
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
+
+
+                    print(
+
+                        f"🔴 Critical escalation: "
+                        f"{cid}"
+
+                    )
+
+
+            # ----------------------------------------------
+            # OPERATIONAL CRITICAL ESCALATION
+            # ----------------------------------------------
+
+            elif (
+
+                old_operational
+                <
+                CRITICAL_OPERATIONAL_PRIORITY
+
+                and
+
+                operational["score"]
+                >=
+                CRITICAL_OPERATIONAL_PRIORITY
+
+            ):
+
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
+
+
+                    print(
+
+                        f"🚨 Operational critical escalation: "
+                        f"{cid}"
+
+                    )
+
+
+            # ----------------------------------------------
+            # OPERATIONAL HIGH ESCALATION
+            # ----------------------------------------------
+
+            elif (
+
+                old_operational
+                <
+                HIGH_OPERATIONAL_PRIORITY
+
+                and
+
+                operational["score"]
+                >=
+                HIGH_OPERATIONAL_PRIORITY
+
+            ):
+
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
+
+
+                    print(
+
+                        f"🟠 Operational priority increased: "
+                        f"{cid}"
+
+                    )
+
+
+            # ----------------------------------------------
+            # RISK ESCALATION
+            # ----------------------------------------------
+
+            elif (
+
                 score_difference
-                >= RISK_CHANGE_ALERT
+                >=
+                RISK_CHANGE_ALERT
 
             ):
 
@@ -3949,36 +4789,6 @@ def main():
 
 
             # ----------------------------------------------
-            # HIGH → CRITICAL
-            # ----------------------------------------------
-
-            elif (
-
-                old_score < 80
-
-                and
-
-                risk["score"] >= 80
-
-            ):
-
-                if alert_allowed(
-                    cid,
-                    state
-                ):
-
-                    should_alert = True
-
-
-                    print(
-
-                        f"🔴 Critical escalation: "
-                        f"{cid}"
-
-                    )
-
-
-            # ----------------------------------------------
             # PERSISTENCE ESCALATION
             # ----------------------------------------------
 
@@ -4010,25 +4820,33 @@ def main():
 
 
             # ----------------------------------------------
-            # TEMPORAL ESCALATION
+            # OPERATIONAL TREND ESCALATION
             # ----------------------------------------------
 
-            elif "تصاعد" in trend:
+            elif trend_code == "ESCALATING":
 
-                if alert_allowed(
-                    cid,
-                    state
+                if (
+
+                    operational["score"]
+                    >=
+                    OPERATIONAL_PRIORITY_THRESHOLD
+
                 ):
 
-                    should_alert = True
+                    if alert_allowed(
+                        cid,
+                        state
+                    ):
+
+                        should_alert = True
 
 
-                    print(
+                        print(
 
-                        f"📈 Temporal escalation: "
-                        f"{cid}"
+                            f"📈 Operational trend escalation: "
+                            f"{cid}"
 
-                    )
+                        )
 
 
         # ====================================================
@@ -4151,6 +4969,16 @@ def main():
 
 
     print(
+        "🎯 Operational priority analysis completed"
+    )
+
+
+    print(
+        "🏛️ Government monitoring decision engine completed"
+    )
+
+
+    print(
         "🚨 Alert cooldown completed"
     )
 
@@ -4161,12 +4989,12 @@ def main():
 
 
     print(
-        "🤖 V5.9 Advanced Temporal & Geographic Verification Engine"
+        "🤖 V5.9.1 Government Monitoring Center Core"
     )
 
 
     print(
-        "✅ V5.9 completed successfully"
+        "✅ V5.9.1 completed successfully"
     )
 
 
