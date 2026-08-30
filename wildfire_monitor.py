@@ -7,12 +7,12 @@ import requests
 
 
 # ============================================================
-# 🔥 Saudi Wildfire Intelligence V5.8
+# 🔥 Saudi Wildfire Intelligence V5.9
 # Advanced Temporal + Geographic Verification Engine
 #
 # NASA FIRMS + VIIRS
 #
-# V5.8:
+# V5.9:
 # - Saudi Arabia Polygon Validation
 # - BBOX pre-filter
 # - Natural fire filtering
@@ -21,6 +21,7 @@ import requests
 # - Spatial clustering
 # - Temporal persistence
 # - Historical cluster matching
+# - Persistent historical memory
 # - Risk Score
 # - Verification Score
 # - Persistence Score
@@ -28,8 +29,11 @@ import requests
 # - Smart Classification
 # - Smart Recommendation
 # - Alert escalation logic
-# - State memory
-# - Telegram Arabic alerts
+# - Alert cooldown
+# - Duplicate alert protection
+# - New cluster intelligence
+# - Strong single-point detection
+# - Arabic executive Telegram alerts
 # ============================================================
 
 
@@ -55,21 +59,18 @@ KSA_TZ = datetime.timezone(
 # STATE FILE
 # ============================================================
 
-STATE_FILE = "wildfire_state_v58.json"
+STATE_FILE = "wildfire_state_v59.json"
 
 
 # ============================================================
 # 🇸🇦 SAUDI ARABIA BBOX
-#
-# يستخدم لتقليل البيانات فقط.
-# التحقق الحقيقي يتم بواسطة Polygon.
 # ============================================================
 
 BBOX = (
-    34.5,   # min longitude
-    16.0,   # min latitude
-    55.8,   # max longitude
-    32.6    # max latitude
+    34.5,
+    16.0,
+    55.8,
+    32.6
 )
 
 
@@ -110,6 +111,14 @@ CLUSTER_MEMORY_HOURS = 72
 
 ALERT_NEW_CLUSTER = True
 
+# منع إرسال نفس التنبيه بشكل متكرر
+ALERT_COOLDOWN_HOURS = 6
+
+# البؤرة الجديدة يجب أن تحقق أحد هذه الشروط
+NEW_CLUSTER_MIN_RISK = 50
+NEW_CLUSTER_MIN_COUNT = 2
+NEW_CLUSTER_STRONG_FRP = 40
+
 
 # ============================================================
 # TEMPORAL SETTINGS
@@ -125,12 +134,21 @@ PERSISTENCE_COUNT_WEIGHT = 0.45
 
 
 # ============================================================
+# HISTORICAL MEMORY
+# ============================================================
+
+HISTORY_MEMORY_HOURS = 168  # 7 أيام
+
+MAX_HISTORY_CLUSTERS = 500
+
+
+# ============================================================
 # HTTP HEADERS
 # ============================================================
 
 HTTP_HEADERS = {
     "User-Agent":
-        "Saudi-Wildfire-Intelligence-V5.8",
+        "Saudi-Wildfire-Intelligence-V5.9",
 
     "Accept":
         "text/csv,*/*",
@@ -142,12 +160,10 @@ HTTP_HEADERS = {
 
 # ============================================================
 # 🇸🇦 SAUDI ARABIA POLYGON
-#
-# Coordinates:
-# (longitude, latitude)
 # ============================================================
 
 SAUDI_POLYGON = [
+
     (42.779332, 16.347891),
     (42.649573, 16.774635),
     (42.347989, 17.075806),
@@ -253,11 +269,23 @@ def now_ksa():
 def default_state():
 
     return {
+
         "seen": {},
+
         "clusters": {},
-        "last_run": None
+
+        "history": {},
+
+        "last_run": None,
+
+        "alerts": {}
+
     }
 
+
+# ============================================================
+# LOAD STATE
+# ============================================================
 
 def load_state():
 
@@ -298,6 +326,16 @@ def load_state():
         )
 
         state.setdefault(
+            "history",
+            {}
+        )
+
+        state.setdefault(
+            "alerts",
+            {}
+        )
+
+        state.setdefault(
             "last_run",
             None
         )
@@ -321,18 +359,28 @@ def load_state():
 
 def save_state(state):
 
-    cutoff = (
-        now_utc()
+    now = now_utc()
+
+    seen_cutoff = (
+        now
         -
         datetime.timedelta(
             hours=CLUSTER_MEMORY_HOURS
         )
     )
 
+    history_cutoff = (
+        now
+        -
+        datetime.timedelta(
+            hours=HISTORY_MEMORY_HOURS
+        )
+    )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # CLEAN SEEN
-    # --------------------------------------------------------
+    # ========================================================
 
     cleaned_seen = {}
 
@@ -349,7 +397,7 @@ def save_state(state):
             )
 
 
-            if dt >= cutoff:
+            if dt >= seen_cutoff:
 
                 cleaned_seen[
                     key
@@ -366,9 +414,9 @@ def save_state(state):
     ] = cleaned_seen
 
 
-    # --------------------------------------------------------
-    # CLEAN CLUSTERS
-    # --------------------------------------------------------
+    # ========================================================
+    # CLEAN CURRENT CLUSTERS
+    # ========================================================
 
     cleaned_clusters = {}
 
@@ -387,7 +435,7 @@ def save_state(state):
             )
 
 
-            if dt >= cutoff:
+            if dt >= seen_cutoff:
 
                 cleaned_clusters[
                     key
@@ -404,14 +452,117 @@ def save_state(state):
     ] = cleaned_clusters
 
 
+    # ========================================================
+    # CLEAN HISTORICAL MEMORY
+    # ========================================================
+
+    cleaned_history = {}
+
+
+    for key, value in state.get(
+        "history",
+        {}
+    ).items():
+
+        try:
+
+            dt = datetime.datetime.fromisoformat(
+                value.get(
+                    "last_seen"
+                )
+            )
+
+
+            if dt >= history_cutoff:
+
+                cleaned_history[
+                    key
+                ] = value
+
+
+        except Exception:
+
+            pass
+
+
+    # Limit memory
+    if len(cleaned_history) > MAX_HISTORY_CLUSTERS:
+
+        ordered = sorted(
+
+            cleaned_history.items(),
+
+            key=lambda item:
+                item[1].get(
+                    "last_seen",
+                    ""
+                ),
+
+            reverse=True
+
+        )
+
+        cleaned_history = dict(
+            ordered[
+                :MAX_HISTORY_CLUSTERS
+            ]
+        )
+
+
+    state[
+        "history"
+    ] = cleaned_history
+
+
+    # ========================================================
+    # CLEAN ALERT MEMORY
+    # ========================================================
+
+    cleaned_alerts = {}
+
+
+    alert_cutoff = (
+        now
+        -
+        datetime.timedelta(
+            hours=HISTORY_MEMORY_HOURS
+        )
+    )
+
+
+    for key, value in state.get(
+        "alerts",
+        {}
+    ).items():
+
+        try:
+
+            dt = datetime.datetime.fromisoformat(
+                value
+            )
+
+
+            if dt >= alert_cutoff:
+
+                cleaned_alerts[
+                    key
+                ] = value
+
+
+        except Exception:
+
+            pass
+
+
+    state[
+        "alerts"
+    ] = cleaned_alerts
+
+
     state[
         "last_run"
-    ] = now_utc().isoformat()
+    ] = now.isoformat()
 
-
-    # --------------------------------------------------------
-    # SAVE
-    # --------------------------------------------------------
 
     with open(
         STATE_FILE,
@@ -440,16 +591,27 @@ def tg_send(text):
 
 
     payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True
+
+        "chat_id":
+            CHAT_ID,
+
+        "text":
+            text,
+
+        "disable_web_page_preview":
+            True
+
     }
 
 
     response = requests.post(
+
         url,
+
         json=payload,
+
         timeout=30
+
     )
 
 
@@ -468,9 +630,13 @@ def tg_send(text):
 def parse_csv(text):
 
     lines = [
+
         line.strip()
+
         for line in text.splitlines()
+
         if line.strip()
+
     ]
 
 
@@ -496,8 +662,14 @@ def parse_csv(text):
 
 
         rows.append({
-            header[i]: columns[i]
-            for i in range(len(header))
+
+            header[i]:
+                columns[i]
+
+            for i in range(
+                len(header)
+            )
+
         })
 
 
@@ -514,19 +686,23 @@ def get_firms_rows(source):
 
 
     bbox = (
+
         f"{min_lon},"
         f"{min_lat},"
         f"{max_lon},"
         f"{max_lat}"
+
     )
 
 
     url = (
+
         "https://firms.modaps.eosdis.nasa.gov/"
         "api/area/csv/"
         f"{FIRMS_KEY}/"
         f"{source}/"
         f"{bbox}/1"
+
     )
 
 
@@ -538,15 +714,21 @@ def get_firms_rows(source):
         try:
 
             print(
+
                 f"   🔄 محاولة الاتصال "
                 f"{attempt + 1}/3"
+
             )
 
 
             response = requests.get(
+
                 url,
+
                 headers=HTTP_HEADERS,
+
                 timeout=60
+
             )
 
 
@@ -558,8 +740,10 @@ def get_firms_rows(source):
 
 
             last_error = (
+
                 f"HTTP "
                 f"{response.status_code}"
+
             )
 
 
@@ -572,9 +756,11 @@ def get_firms_rows(source):
 
 
     print(
+
         f"❌ FIRMS API error "
         f"({source}): "
         f"{last_error}"
+
     )
 
 
@@ -667,18 +853,26 @@ def is_inside_saudi(
 
 
     if not (
+
         min_lat <= lat <= max_lat
+
         and
+
         min_lon <= lon <= max_lon
+
     ):
 
         return False
 
 
     return point_in_polygon(
+
         lat,
+
         lon,
+
         SAUDI_POLYGON
+
     )
 
 
@@ -714,27 +908,41 @@ def parse_acquisition_datetime(
 
 
         if (
+
             hour > 23
+
             or
+
             minute > 59
+
         ):
 
             return None
 
 
         year, month, day = map(
+
             int,
+
             date_value.split("-")
+
         )
 
 
         return datetime.datetime(
+
             year,
+
             month,
+
             day,
+
             hour,
+
             minute,
+
             tzinfo=datetime.timezone.utc
+
         )
 
 
@@ -834,7 +1042,6 @@ def distance_km(
         lat1
     )
 
-
     lat2_rad = math.radians(
         lat2
     )
@@ -860,11 +1067,15 @@ def distance_km(
 
         +
 
-        math.cos(lat1_rad)
+        math.cos(
+            lat1_rad
+        )
 
         *
 
-        math.cos(lat2_rad)
+        math.cos(
+            lat2_rad
+        )
 
         *
 
@@ -876,6 +1087,7 @@ def distance_km(
 
 
     return (
+
         earth_radius
         *
         2
@@ -884,6 +1096,7 @@ def distance_km(
             math.sqrt(a),
             math.sqrt(1 - a)
         )
+
     )
 
 
@@ -978,9 +1191,13 @@ def normalize_rows(rows):
 
 
         if not (
+
             min_lat <= lat <= max_lat
+
             and
+
             min_lon <= lon <= max_lon
+
         ):
 
             outside_bbox += 1
@@ -989,7 +1206,7 @@ def normalize_rows(rows):
 
 
         # ----------------------------------------------------
-        # SAUDI POLYGON
+        # POLYGON
         # ----------------------------------------------------
 
         if not is_inside_saudi(
@@ -1021,12 +1238,15 @@ def normalize_rows(rows):
 
         acquisition = (
             parse_acquisition_datetime(
+
                 row.get(
                     "acq_date"
                 ),
+
                 row.get(
                     "acq_time"
                 )
+
             )
         )
 
@@ -1037,9 +1257,11 @@ def normalize_rows(rows):
 
 
         age_hours = (
+
             current_time
             -
             acquisition
+
         ).total_seconds() / 3600
 
 
@@ -1086,9 +1308,11 @@ def normalize_rows(rows):
         # ----------------------------------------------------
 
         confidence = confidence_score(
+
             row.get(
                 "confidence"
             )
+
         )
 
 
@@ -1189,9 +1413,11 @@ def remove_duplicates(events):
         else:
 
             if (
+
                 event["frp"]
                 >
                 unique[key]["frp"]
+
             ):
 
                 unique[key] = event
@@ -1212,10 +1438,14 @@ def cluster_events(events):
 
 
     events = sorted(
+
         events,
+
         key=lambda x:
             x["frp"],
+
         reverse=True
+
     )
 
 
@@ -1325,11 +1555,14 @@ def cluster_events(events):
                 ] = (
 
                     sum(
+
                         e["lat"]
+
                         for e in
                         cluster[
                             "events"
                         ]
+
                     )
                     /
                     count
@@ -1344,11 +1577,14 @@ def cluster_events(events):
                 ] = (
 
                     sum(
+
                         e["lon"]
+
                         for e in
                         cluster[
                             "events"
                         ]
+
                     )
                     /
                     count
@@ -1394,7 +1630,7 @@ def cluster_events(events):
 
 
 # ============================================================
-# BASIC FRP SCORE
+# FRP SCORE
 # ============================================================
 
 def frp_score_value(max_frp):
@@ -1467,15 +1703,7 @@ def cluster_score_value(count):
 
 
 # ============================================================
-# TEMPORAL PERSISTENCE
-#
-# V5.8:
-# الاستمرارية لم تعد ثابتة.
-#
-# يتم حسابها من:
-# 1. عدد مرات ظهور البؤرة
-# 2. قرب آخر ظهور زمنيًا
-# 3. عمر البؤرة في الذاكرة
+# PERSISTENCE
 # ============================================================
 
 def calculate_persistence(
@@ -1489,10 +1717,12 @@ def calculate_persistence(
 
 
     previous_count = int(
+
         previous.get(
             "observations",
             1
         )
+
     )
 
 
@@ -1542,10 +1772,6 @@ def calculate_persistence(
         return 20
 
 
-    # --------------------------------------------------------
-    # TIME RECENCY
-    # --------------------------------------------------------
-
     recency = max(
 
         0,
@@ -1562,10 +1788,6 @@ def calculate_persistence(
 
     )
 
-
-    # --------------------------------------------------------
-    # OBSERVATION COUNT
-    # --------------------------------------------------------
 
     if previous_count >= 10:
 
@@ -1592,10 +1814,6 @@ def calculate_persistence(
         observation_score = 25
 
 
-    # --------------------------------------------------------
-    # FINAL PERSISTENCE
-    # --------------------------------------------------------
-
     persistence = (
 
         recency
@@ -1612,6 +1830,7 @@ def calculate_persistence(
 
 
     return round(
+
         max(
             20,
             min(
@@ -1619,11 +1838,12 @@ def calculate_persistence(
                 persistence
             )
         )
+
     )
 
 
 # ============================================================
-# RISK ENGINE V5.8
+# RISK ENGINE
 # ============================================================
 
 def calculate_risk(
@@ -1649,9 +1869,12 @@ def calculate_risk(
     avg_confidence = (
 
         sum(
+
             e["confidence"]
+
             for e in
             cluster["events"]
+
         )
 
         /
@@ -1670,15 +1893,6 @@ def calculate_risk(
         count
     )
 
-
-    # --------------------------------------------------------
-    # V5.8 WEIGHTS
-    #
-    # FRP           35%
-    # Cluster       25%
-    # Confidence    20%
-    # Persistence   20%
-    # --------------------------------------------------------
 
     risk = (
 
@@ -1769,7 +1983,7 @@ def calculate_risk(
 
 
 # ============================================================
-# VERIFICATION SCORE V5.8
+# VERIFICATION
 # ============================================================
 
 def calculate_verification_score(
@@ -1790,9 +2004,12 @@ def calculate_verification_score(
     avg_confidence = (
 
         sum(
+
             e["confidence"]
+
             for e in
             cluster["events"]
+
         )
 
         /
@@ -1811,15 +2028,6 @@ def calculate_verification_score(
         max_frp
     )
 
-
-    # --------------------------------------------------------
-    # VERIFICATION
-    #
-    # Cluster       35%
-    # FRP           30%
-    # Confidence    20%
-    # Persistence   15%
-    # --------------------------------------------------------
 
     verification = (
 
@@ -1854,7 +2062,7 @@ def calculate_verification_score(
 
 
 # ============================================================
-# CLASSIFICATION V5.8
+# CLASSIFICATION
 # ============================================================
 
 def classify_cluster(
@@ -1878,10 +2086,6 @@ def classify_cluster(
     ]
 
 
-    # --------------------------------------------------------
-    # CRITICAL
-    # --------------------------------------------------------
-
     if (
 
         score >= 80
@@ -1900,10 +2104,6 @@ def classify_cluster(
 
         )
 
-
-    # --------------------------------------------------------
-    # HIGH + PERSISTENT
-    # --------------------------------------------------------
 
     if (
 
@@ -1928,10 +2128,6 @@ def classify_cluster(
         )
 
 
-    # --------------------------------------------------------
-    # HIGH CLUSTER
-    # --------------------------------------------------------
-
     if (
 
         score >= 60
@@ -1951,9 +2147,24 @@ def classify_cluster(
         )
 
 
-    # --------------------------------------------------------
-    # MEDIUM
-    # --------------------------------------------------------
+    if (
+
+        max_frp >= NEW_CLUSTER_STRONG_FRP
+
+        and
+
+        count == 1
+
+    ):
+
+        return (
+
+            "نقطة حرارية قوية",
+
+            "شدة حرارية مرتفعة وتحتاج إلى تحقق إضافي"
+
+        )
+
 
     if score >= 50:
 
@@ -1962,21 +2173,6 @@ def classify_cluster(
             "بؤرة حرارية تحتاج مراقبة",
 
             "بؤرة حرارية ملحوظة وتحتاج إلى المتابعة"
-
-        )
-
-
-    # --------------------------------------------------------
-    # STRONG SINGLE
-    # --------------------------------------------------------
-
-    if max_frp >= 40:
-
-        return (
-
-            "نقطة حرارية قوية",
-
-            "شدة حرارية مرتفعة ولكن الأدلة غير كافية لتأكيد حريق"
 
         )
 
@@ -1992,29 +2188,33 @@ def classify_cluster(
 
 # ============================================================
 # CLUSTER ID
-#
-# استخدام دقة أعلى من V5.7.
 # ============================================================
 
 def cluster_id(cluster):
 
     lat = round(
+
         cluster[
             "center"
         ][
             "lat"
         ],
+
         2
+
     )
 
 
     lon = round(
+
         cluster[
             "center"
         ][
             "lon"
         ],
+
         2
+
     )
 
 
@@ -2025,9 +2225,6 @@ def cluster_id(cluster):
 
 # ============================================================
 # HISTORICAL MATCH
-#
-# يبحث عن بؤرة سابقة قريبة حتى لو تغير مركز التجمع
-# قليلًا بين التشغيلات.
 # ============================================================
 
 def find_previous_cluster(
@@ -2063,9 +2260,11 @@ def find_previous_cluster(
 
             previous_last_seen = (
                 datetime.datetime.fromisoformat(
+
                     previous.get(
                         "last_seen"
                     )
+
                 )
             )
 
@@ -2108,6 +2307,7 @@ def find_previous_cluster(
                 )
             )
 
+
         except Exception:
 
             continue
@@ -2132,9 +2332,13 @@ def find_previous_cluster(
 
 
         if (
+
             best_distance is None
+
             or
+
             distance < best_distance
+
         ):
 
             best_distance = distance
@@ -2183,9 +2387,11 @@ def calculate_trend(
 
 
     difference = (
+
         new_score
         -
         old_score
+
     )
 
 
@@ -2238,10 +2444,6 @@ def recommendation(
     ]
 
 
-    # --------------------------------------------------------
-    # CRITICAL
-    # --------------------------------------------------------
-
     if (
 
         score >= 80
@@ -2261,15 +2463,9 @@ def recommendation(
         )
 
 
-    # --------------------------------------------------------
-    # HIGH
-    # --------------------------------------------------------
-
     if score >= 65:
 
-        if (
-            "تصاعد" in trend
-        ):
+        if "تصاعد" in trend:
 
             return (
 
@@ -2296,10 +2492,6 @@ def recommendation(
 
         )
 
-
-    # --------------------------------------------------------
-    # MEDIUM
-    # --------------------------------------------------------
 
     if score >= 50:
 
@@ -2407,6 +2599,153 @@ def google_maps(
 
 
 # ============================================================
+# ALERT COOLDOWN
+# ============================================================
+
+def alert_allowed(
+    cid,
+    state
+):
+
+    alerts = state.get(
+        "alerts",
+        {}
+    )
+
+
+    last_alert_raw = alerts.get(
+        cid
+    )
+
+
+    if not last_alert_raw:
+
+        return True
+
+
+    try:
+
+        last_alert = (
+            datetime.datetime.fromisoformat(
+                last_alert_raw
+            )
+        )
+
+
+    except Exception:
+
+        return True
+
+
+    elapsed = (
+
+        now_utc()
+        -
+        last_alert
+
+    ).total_seconds() / 3600
+
+
+    if elapsed >= ALERT_COOLDOWN_HOURS:
+
+        return True
+
+
+    print(
+
+        f"⏸️ Alert cooldown active: "
+        f"{cid} | "
+        f"{elapsed:.1f}h"
+
+    )
+
+
+    return False
+
+
+# ============================================================
+# MARK ALERT
+# ============================================================
+
+def mark_alert(
+    cid,
+    state
+):
+
+    state.setdefault(
+        "alerts",
+        {}
+    )
+
+
+    state[
+        "alerts"
+    ][
+        cid
+    ] = now_utc().isoformat()
+
+
+# ============================================================
+# NEW CLUSTER DECISION
+# ============================================================
+
+def is_significant_new_cluster(
+    cluster
+):
+
+    risk = cluster[
+        "risk"
+    ]
+
+
+    if risk[
+        "score"
+    ] >= NEW_CLUSTER_MIN_RISK:
+
+        return True
+
+
+    if (
+
+        risk[
+            "count"
+        ]
+        >= NEW_CLUSTER_MIN_COUNT
+
+        and
+
+        risk[
+            "max_frp"
+        ]
+        >= 20
+
+    ):
+
+        return True
+
+
+    if (
+
+        risk[
+            "count"
+        ] == 1
+
+        and
+
+        risk[
+            "max_frp"
+        ]
+        >= NEW_CLUSTER_STRONG_FRP
+
+    ):
+
+        return True
+
+
+    return False
+
+
+# ============================================================
 # NO FIRE REPORT
 # ============================================================
 
@@ -2418,7 +2757,7 @@ def send_no_fire_report(
 
     message = f"""
 
-🟢 رصد حرائق السعودية — V5.8 AI
+🟢 رصد حرائق السعودية — V5.9 AI
 
 🕒 {now_ksa()}
 
@@ -2437,10 +2776,13 @@ def send_no_fire_report(
 NASA FIRMS / VIIRS
 
 🤖 محرك التحليل:
-V5.8 Advanced Temporal & Geographic Verification Engine
+V5.9 Advanced Temporal & Geographic Verification Engine
 
 🇸🇦 التحقق الجغرافي:
 Saudi Arabia Boundary Polygon
+
+⏱️ التحليل الزمني:
+Historical Persistence + Trend Analysis
 
 ⚠️ المخرجات تمثل بؤرًا حرارية وليست تأكيدًا ميدانيًا للحريق.
 
@@ -2494,9 +2836,7 @@ def send_fire_report(
     ]
 
 
-    highest = top[
-        0
-    ]
+    highest = top[0]
 
 
     highest_risk = highest[
@@ -2545,7 +2885,7 @@ def send_fire_report(
 
 
     message.append(
-        "🔥 تنبيه حرائق السعودية — V5.8 AI"
+        "🔥 تنبيه حرائق السعودية — V5.9 AI"
     )
 
 
@@ -2558,20 +2898,26 @@ def send_fire_report(
 
 
     message.append(
+
         f"🚨 البؤر التي تستدعي المتابعة: "
         f"{len(clusters)}"
+
     )
 
 
     message.append(
+
         f"📊 النقاط الحرارية المحللة: "
         f"{normalized_count}"
+
     )
 
 
     message.append(
+
         f"🇸🇦 النقاط المستبعدة خارج حدود المملكة: "
         f"{outside_saudi}"
+
     )
 
 
@@ -2579,7 +2925,7 @@ def send_fire_report(
 
 
     message.append(
-        "⚠️ أعلى مستوى خطورة:"
+        "🚨 أعلى مستوى خطورة:"
     )
 
 
@@ -2602,6 +2948,19 @@ def send_fire_report(
 
     message.append(
         f"{highest_verification}/100"
+    )
+
+
+    message.append("")
+
+
+    message.append(
+        "⏱️ الاستمرارية:"
+    )
+
+
+    message.append(
+        f"{highest_persistence}/100"
     )
 
 
@@ -2665,8 +3024,11 @@ def send_fire_report(
 
 
         region = approximate_region(
+
             lat,
+
             lon
+
         )
 
 
@@ -2684,14 +3046,20 @@ def send_fire_report(
 
 
         trend_text = cluster.get(
+
             "trend",
+
             "➡️ مستقر"
+
         )
 
 
         trend_description = cluster.get(
+
             "trend_description",
+
             "مستوى الخطورة مستقر نسبيًا"
+
         )
 
 
@@ -2771,7 +3139,7 @@ def send_fire_report(
 
         message.append(
 
-            f"🤖 التقييم: "
+            f"🤖 التصنيف: "
             f"{classification}"
 
         )
@@ -2788,7 +3156,6 @@ def send_fire_report(
         message.append(
 
             f"🔄 الحالة: "
-            f"{trend_text} — "
             f"{trend_description}"
 
         )
@@ -2804,7 +3171,7 @@ def send_fire_report(
 
         message.append(
 
-            f"🧠 الاستمرارية: "
+            f"⏱️ الاستمرارية: "
             f"{persistence}/100"
 
         )
@@ -2832,10 +3199,15 @@ def send_fire_report(
 
 
     message.append(
+
         google_maps(
+
             highest_lat,
+
             highest_lon
+
         )
+
     )
 
 
@@ -2858,7 +3230,7 @@ def send_fire_report(
 
 
     message.append(
-        "V5.8 Advanced Temporal & Geographic Verification Engine"
+        "V5.9 Advanced Temporal & Geographic Verification Engine"
     )
 
 
@@ -2896,7 +3268,9 @@ def send_fire_report(
 
 
     message.append(
+
         "https://firms.modaps.eosdis.nasa.gov/map/"
+
     )
 
 
@@ -2905,6 +3279,62 @@ def send_fire_report(
             message
         )
     )
+
+
+# ============================================================
+# UPDATE HISTORICAL MEMORY
+# ============================================================
+
+def update_history(
+    state,
+    current_cluster_state
+):
+
+    history = state.setdefault(
+        "history",
+        {}
+    )
+
+
+    for cid, current in current_cluster_state.items():
+
+        previous_history = history.get(
+            cid
+        )
+
+
+        if previous_history:
+
+            observations = int(
+
+                previous_history.get(
+                    "observations",
+                    0
+                )
+
+            ) + 1
+
+
+            current[
+                "historical_observations"
+            ] = observations
+
+
+        else:
+
+            current[
+                "historical_observations"
+            ] = 1
+
+
+        history[
+            cid
+        ] = current
+
+
+    state[
+        "history"
+    ] = history
 
 
 # ============================================================
@@ -2919,7 +3349,7 @@ def main():
 
 
     print(
-        "🔥 Saudi Wildfire Intelligence V5.8"
+        "🔥 Saudi Wildfire Intelligence V5.9"
     )
 
 
@@ -2939,7 +3369,17 @@ def main():
 
 
     print(
-        "🧠 Historical Cluster Matching ENABLED"
+        "🧠 Historical Memory ENABLED"
+    )
+
+
+    print(
+        "🚨 Alert Cooldown ENABLED"
+    )
+
+
+    print(
+        "📈 Escalation Detection ENABLED"
     )
 
 
@@ -2957,9 +3397,25 @@ def main():
     )
 
 
-    previous_clusters = state.get(
-        "clusters",
-        {}
+    # ========================================================
+    # IMPORTANT:
+    # نستخدم التاريخ السابق + الحالة الحالية
+    # ========================================================
+
+    previous_clusters = {}
+
+    previous_clusters.update(
+        state.get(
+            "history",
+            {}
+        )
+    )
+
+    previous_clusters.update(
+        state.get(
+            "clusters",
+            {}
+        )
     )
 
 
@@ -3084,9 +3540,9 @@ def main():
             continue
 
 
-        seen[uid] = (
-            now_utc().isoformat()
-        )
+        seen[
+            uid
+        ] = now_utc().isoformat()
 
 
         new_events.append(
@@ -3116,11 +3572,10 @@ def main():
 
 
     # ========================================================
-    # RISK + VERIFICATION + PERSISTENCE
+    # RISK / VERIFICATION / PERSISTENCE
     # ========================================================
 
     alert_clusters = []
-
 
     current_cluster_state = {}
 
@@ -3222,7 +3677,7 @@ def main():
 
 
         # ----------------------------------------------------
-        # CLUSTER ID
+        # ID
         # ----------------------------------------------------
 
         cid = cluster_id(
@@ -3231,17 +3686,20 @@ def main():
 
 
         # ----------------------------------------------------
-        # OBSERVATION COUNT
+        # OBSERVATIONS
         # ----------------------------------------------------
 
         if previous:
 
             observations = int(
+
                 previous.get(
                     "observations",
                     1
                 )
+
             ) + 1
+
 
         else:
 
@@ -3249,7 +3707,7 @@ def main():
 
 
         # ----------------------------------------------------
-        # CURRENT STATE
+        # STATE
         # ----------------------------------------------------
 
         current_cluster_state[
@@ -3298,11 +3756,13 @@ def main():
 
 
         print(
+
             f"   🔥 {cid} | "
             f"Risk {risk['score']} | "
             f"Verify {verification} | "
             f"Persistence {persistence} | "
             f"{trend}"
+
         )
 
 
@@ -3324,6 +3784,11 @@ def main():
 
             persistence
             < 50
+
+            and
+
+            risk["max_frp"]
+            < NEW_CLUSTER_STRONG_FRP
 
         ):
 
@@ -3351,18 +3816,39 @@ def main():
 
         if previous is None:
 
-            if ALERT_NEW_CLUSTER:
+            if (
+
+                ALERT_NEW_CLUSTER
+
+                and
+
+                is_significant_new_cluster(
+                    cluster
+                )
+
+                and
+
+                alert_allowed(
+                    cid,
+                    state
+                )
+
+            ):
 
                 should_alert = True
 
 
                 print(
 
-                    f"🆕 New alert cluster: "
+                    f"🆕 Significant new alert cluster: "
                     f"{cid}"
 
                 )
 
+
+        # ----------------------------------------------------
+        # EXISTING CLUSTER
+        # ----------------------------------------------------
 
         else:
 
@@ -3404,30 +3890,37 @@ def main():
             )
 
 
-            # ------------------------------------------------
+            # ----------------------------------------------
             # RISK ESCALATION
-            # ------------------------------------------------
+            # ----------------------------------------------
 
             if (
+
                 score_difference
                 >= RISK_CHANGE_ALERT
+
             ):
 
-                should_alert = True
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
 
 
-                print(
+                    print(
 
-                    f"📈 Escalated cluster: "
-                    f"{cid} "
-                    f"(+{score_difference})"
+                        f"📈 Escalated cluster: "
+                        f"{cid} "
+                        f"(+{score_difference})"
 
-                )
+                    )
 
 
-            # ------------------------------------------------
+            # ----------------------------------------------
             # LOW → HIGH
-            # ------------------------------------------------
+            # ----------------------------------------------
 
             elif (
 
@@ -3439,20 +3932,25 @@ def main():
 
             ):
 
-                should_alert = True
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
 
 
-                print(
+                    print(
 
-                    f"🚨 Risk level increased: "
-                    f"{cid}"
+                        f"🚨 Risk level increased: "
+                        f"{cid}"
 
-                )
+                    )
 
 
-            # ------------------------------------------------
+            # ----------------------------------------------
             # HIGH → CRITICAL
-            # ------------------------------------------------
+            # ----------------------------------------------
 
             elif (
 
@@ -3464,20 +3962,25 @@ def main():
 
             ):
 
-                should_alert = True
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
 
 
-                print(
+                    print(
 
-                    f"🔴 Critical escalation: "
-                    f"{cid}"
+                        f"🔴 Critical escalation: "
+                        f"{cid}"
 
-                )
+                    )
 
 
-            # ------------------------------------------------
+            # ----------------------------------------------
             # PERSISTENCE ESCALATION
-            # ------------------------------------------------
+            # ----------------------------------------------
 
             elif (
 
@@ -3489,33 +3992,43 @@ def main():
 
             ):
 
-                should_alert = True
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
 
 
-                print(
+                    print(
 
-                    f"⏱️ Persistence increased: "
-                    f"{cid} "
-                    f"(+{persistence_difference})"
+                        f"⏱️ Persistence increased: "
+                        f"{cid} "
+                        f"(+{persistence_difference})"
 
-                )
+                    )
 
 
-            # ------------------------------------------------
-            # TREND ESCALATION
-            # ------------------------------------------------
+            # ----------------------------------------------
+            # TEMPORAL ESCALATION
+            # ----------------------------------------------
 
             elif "تصاعد" in trend:
 
-                should_alert = True
+                if alert_allowed(
+                    cid,
+                    state
+                ):
+
+                    should_alert = True
 
 
-                print(
+                    print(
 
-                    f"📈 Temporal escalation: "
-                    f"{cid}"
+                        f"📈 Temporal escalation: "
+                        f"{cid}"
 
-                )
+                    )
 
 
         # ====================================================
@@ -3528,10 +4041,28 @@ def main():
                 cluster
             )
 
+            mark_alert(
+                cid,
+                state
+            )
+
 
     print(
         f"🚨 Alert clusters: "
         f"{len(alert_clusters)}"
+    )
+
+
+    # ========================================================
+    # UPDATE HISTORICAL MEMORY
+    # ========================================================
+
+    update_history(
+
+        state,
+
+        current_cluster_state
+
     )
 
 
@@ -3615,12 +4146,27 @@ def main():
 
 
     print(
-        "🤖 V5.8 Advanced Temporal & Geographic Verification Engine"
+        "💾 Persistent historical memory completed"
     )
 
 
     print(
-        "✅ V5.8 completed successfully"
+        "🚨 Alert cooldown completed"
+    )
+
+
+    print(
+        "📈 Escalation analysis completed"
+    )
+
+
+    print(
+        "🤖 V5.9 Advanced Temporal & Geographic Verification Engine"
+    )
+
+
+    print(
+        "✅ V5.9 completed successfully"
     )
 
 
